@@ -1,9 +1,11 @@
-use std::net::SocketAddr;
 use crate::grpc::voting_request::Vote;
 use crate::grpc::voting_server::{Voting, VotingServer};
+use std::net::SocketAddr;
 
-use tonic::{Code, Request, Response, Status};
 use tonic::transport::Server;
+use tonic::{Code, Request, Response, Status};
+
+// reference: https://www.thorsten-hans.com/grpc-services-in-rust-with-tonic/
 
 tonic::include_proto!("voting");
 

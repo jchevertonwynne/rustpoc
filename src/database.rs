@@ -1,6 +1,8 @@
 use mongodb::bson::oid::ObjectId;
+use mongodb::bson::Document;
 use mongodb::options::CreateCollectionOptions;
 use mongodb::{options::ClientOptions, Client};
+use rustpoc::server::Body;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -15,10 +17,17 @@ async fn main() -> anyhow::Result<()> {
     // Get a handle to the deployment.
     let client = Client::with_options(client_options)?;
 
+    // client
+    //     .database("joseph")
+    //     .create_collection("sample", CreateCollectionOptions::default())
+    //     .await?;
+
     client
         .database("joseph")
-        .create_collection("sample", CreateCollectionOptions::default())
-        .await?;
+        .collection::<Body>("sample")
+        .delete_many(Document::default(), None)
+        .await
+        .unwrap();
 
     // let mut cursor = client
     //     .database("bugsnag_development")

@@ -19,7 +19,11 @@ async fn main() -> anyhow::Result<()> {
         .with_line_number(true)
         .init();
 
-    rustpoc::grpc::run_server("127.0.0.1:3001".parse().context("failed to parse address")?);
+    rustpoc::grpc::run_server(
+        "127.0.0.1:3001"
+            .parse()
+            .context("failed to parse address")?,
+    );
 
     let database = Arc::new(DataBase::new({
         let mut client_options = ClientOptions::parse("mongodb://localhost:27017").await?;
