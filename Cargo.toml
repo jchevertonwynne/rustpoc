@@ -1,5 +1,5 @@
 [package]
-name = "rabbittest"
+name = "rustpoc"
 version = "0.1.0"
 edition = "2021"
 

@@ -1428,26 +1428,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rabbittest"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "futures-lite",
- "lapin",
- "mongodb",
- "serde",
- "serde_json",
- "serde_with 2.0.1",
- "thiserror",
- "time 0.3.15",
- "tokio",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "rand"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1602,6 +1582,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0864aeff53f8c05aa08d86e5ef839d3dfcf07aeba2db32f12db0ef716e87bd55"
 dependencies = [
  "base64",
+]
+
+[[package]]
+name = "rustpoc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-lite",
+ "lapin",
+ "mongodb",
+ "serde",
+ "serde_json",
+ "serde_with 2.0.1",
+ "thiserror",
+ "time 0.3.15",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

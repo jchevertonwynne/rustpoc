@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use mongodb::options::ClientOptions;
-use rabbittest::db::DataBase;
 
-use rabbittest::rabbit::Rabbit;
-use rabbittest::rabbit::MESSAGE_TYPE;
-use rabbittest::server::{Body, Server};
+use rustpoc::db::DataBase;
+use rustpoc::rabbit::Rabbit;
+use rustpoc::rabbit::MESSAGE_TYPE;
+use rustpoc::server::{Body, Server};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -17,12 +17,11 @@ async fn main() -> anyhow::Result<()> {
         .with_line_number(true)
         .init();
 
-    let client_options = {
+    let database = Arc::new(DataBase::new({
         let mut client_options = ClientOptions::parse("mongodb://localhost:27017").await?;
         client_options.app_name = Some("joseph".to_string());
         client_options
-    };
-    let database = Arc::new(DataBase::new(client_options)?);
+    })?);
 
     tracing::info!("connected to mongo");
 
