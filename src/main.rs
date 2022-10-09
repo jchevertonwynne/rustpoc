@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use mongodb::options::ClientOptions;
+use tokio::sync::Mutex;
 
 use rustpoc::db::DataBase;
+use rustpoc::grpc::voting_client::VotingClient;
 use rustpoc::rabbit::Rabbit;
 use rustpoc::rabbit::MESSAGE_TYPE;
 use rustpoc::server::{Body, Server};
@@ -16,6 +18,8 @@ async fn main() -> anyhow::Result<()> {
         .with_file(true)
         .with_line_number(true)
         .init();
+
+    rustpoc::grpc::run_server("127.0.0.1:3001".parse().context("failed to parse address")?);
 
     let database = Arc::new(DataBase::new({
         let mut client_options = ClientOptions::parse("mongodb://localhost:27017").await?;
@@ -47,10 +51,18 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("setup message listener");
 
+    let client = Arc::new(Mutex::new(
+        VotingClient::connect("http://127.0.0.1:3001")
+            .await
+            .context("failed to create grpc client")?,
+    ));
+
+    tracing::info!("grpc client connected");
+
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 3000)))
         .context("failed to bind tcp listener to port")?;
 
-    let app = Server::new(rabbit, database);
+    let app = Server::new(rabbit, database, client);
     app.run(listener).await.context("app run failed")?;
 
     Ok(())

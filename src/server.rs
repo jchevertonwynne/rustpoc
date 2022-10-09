@@ -12,9 +12,15 @@ use serde_with::serde_as;
 use serde_with::DisplayFromStr;
 use thiserror::Error;
 use time::OffsetDateTime;
+use tokio::sync::Mutex;
+
+use tonic::transport::Channel;
 use tower_http::add_extension::AddExtensionLayer;
 
 use crate::db::{DataBase, COLLECTION};
+use crate::grpc::voting_client::VotingClient;
+use crate::grpc::voting_request::Vote;
+use crate::grpc::VotingRequest;
 use crate::rabbit::{PublishError, Rabbit};
 
 pub struct Server {
@@ -22,11 +28,16 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(rabbit: Arc<Rabbit>, database: Arc<DataBase>) -> Server {
+    pub fn new(
+        rabbit: Arc<Rabbit>,
+        database: Arc<DataBase>,
+        grpc_client: Arc<Mutex<VotingClient<Channel>>>,
+    ) -> Server {
         let router = axum::Router::new()
             .route("/", axum::routing::post(handle))
             .layer(AddExtensionLayer::new(rabbit))
             .layer(AddExtensionLayer::new(database))
+            .layer(AddExtensionLayer::new(grpc_client))
             .route_layer(from_fn(bugsnag_non_200s));
         Server { router }
     }
@@ -62,6 +73,7 @@ async fn handle(
     res: Result<Json<Body>, JsonRejection>,
     Extension(rabbit): Extension<Arc<Rabbit>>,
     Extension(mongo): Extension<Arc<DataBase>>,
+    Extension(grpc): Extension<Arc<Mutex<VotingClient<Channel>>>>,
 ) -> Result<String, ServeError> {
     let body = match res {
         Ok(Json(body)) => body,
@@ -103,6 +115,24 @@ async fn handle(
         }
     };
 
+    let vote_result = match grpc
+        .lock()
+        .await
+        .vote(VotingRequest {
+            url: "yolo".to_string(),
+            vote: Vote::Up.into(),
+        })
+        .await
+    {
+        Ok(resp) => resp,
+        Err(err) => {
+            tracing::error!("failed to grpc vote: {:?}", err);
+            return Err(err.into());
+        }
+    };
+
+    tracing::info!("received vote response: {:?}", vote_result);
+
     Ok(result)
 }
 
@@ -116,6 +146,8 @@ pub enum ServeError {
     SerializeError(#[from] serde_json::error::Error),
     #[error("failed to publish to rabbit: {0}")]
     RabbitError(#[from] PublishError),
+    #[error("grpc call failed: {0}")]
+    GrpcError(#[from] tonic::Status),
 }
 
 impl IntoResponse for ServeError {
@@ -125,6 +157,7 @@ impl IntoResponse for ServeError {
             ServeError::DatabaseErr(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ServeError::SerializeError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ServeError::RabbitError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ServeError::GrpcError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (code, format!("{}", self)).into_response()
     }

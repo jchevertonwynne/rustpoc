@@ -1,0 +1,21 @@
+syntax = "proto3";
+package voting;
+
+service Voting {
+  rpc Vote (VotingRequest) returns (VotingResponse);
+}
+
+message VotingRequest {
+  string url = 1;
+
+  enum Vote {
+    UNKNOWN = 0;
+    UP = 1;
+    DOWN = 2;
+  }
+  Vote vote = 2;
+}
+
+message VotingResponse {
+  string confirmation = 1;
+}
