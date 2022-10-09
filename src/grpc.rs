@@ -19,7 +19,7 @@ impl Voting for VotingService {
         request: Request<VotingRequest>,
     ) -> Result<Response<VotingResponse>, Status> {
         let request = request.into_inner();
-        tracing::info!("received a vote reqeust: {:?}", request);
+        tracing::info!("received a vote request: {:?}", request);
 
         let vote = match Vote::from_i32(request.vote) {
             Some(vote) => vote,

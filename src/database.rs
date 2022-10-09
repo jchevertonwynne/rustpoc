@@ -1,6 +1,6 @@
 use mongodb::bson::oid::ObjectId;
 use mongodb::bson::Document;
-use mongodb::options::CreateCollectionOptions;
+
 use mongodb::{options::ClientOptions, Client};
 use rustpoc::server::Body;
 use serde::Deserialize;

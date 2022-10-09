@@ -6,10 +6,11 @@ use axum::middleware::{from_fn, Next};
 use axum::response::Response;
 use axum::{http::StatusCode, response::IntoResponse, Extension, Json, Router};
 use mongodb::bson::oid::ObjectId;
+
 use serde::Deserialize;
 use serde::Serialize;
 use serde_with::serde_as;
-use serde_with::DisplayFromStr;
+
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
@@ -33,7 +34,7 @@ impl Server {
         database: Arc<DataBase>,
         grpc_client: Arc<Mutex<VotingClient<Channel>>>,
     ) -> Server {
-        let router = axum::Router::new()
+        let router = Router::new()
             .route("/", axum::routing::post(handle))
             .layer(AddExtensionLayer::new(rabbit))
             .layer(AddExtensionLayer::new(database))
@@ -136,7 +137,7 @@ async fn handle(
     Ok(result)
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum ServeError {
     #[error("error in the json payload: {0}")]
     JsonErr(#[from] JsonRejection),
@@ -166,9 +167,10 @@ impl IntoResponse for ServeError {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Body {
-    #[serde_as(as = "DisplayFromStr")]
+    // #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "gamesConsoleConnectorId")]
     games_console_connector_id: ObjectId,
+    // #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "projectId")]
     project_id: ObjectId,
     #[serde(rename = "type")]

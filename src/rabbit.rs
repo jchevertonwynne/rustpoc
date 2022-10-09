@@ -185,7 +185,7 @@ pub enum ConsumeError {
 
 async fn process_delivery<T: DeserializeOwned + Debug>(
     delivery: &Delivery,
-    header: &'static str,
+    header: &str,
 ) -> anyhow::Result<()> {
     let message_type_header = std::str::from_utf8(
         delivery
@@ -194,7 +194,7 @@ async fn process_delivery<T: DeserializeOwned + Debug>(
             .as_ref()
             .context("no headers found")?
             .inner()
-            .get(&ShortString::from("message_type"))
+            .get("message_type")
             .context("expected a message type header")?
             .as_long_string()
             .context("expected a long string")?
