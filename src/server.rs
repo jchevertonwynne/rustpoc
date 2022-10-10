@@ -75,7 +75,7 @@ async fn handle(
     Extension(rabbit): Extension<Arc<Rabbit>>,
     Extension(mongo): Extension<Arc<DataBase>>,
     Extension(grpc): Extension<Arc<Mutex<VotingClient<Channel>>>>,
-) -> Result<String, ServeError> {
+) -> Result<Json<ResultBody>, ServeError> {
     let body = match res {
         Ok(Json(body)) => body,
         Err(err) => {
@@ -103,19 +103,6 @@ async fn handle(
         return Err(err.into());
     }
 
-    #[derive(Serialize)]
-    struct Result {
-        doc_count: u64,
-    }
-
-    let result = match serde_json::to_string(&Result { doc_count }) {
-        Ok(result) => result,
-        Err(err) => {
-            tracing::error!("failed to serialize response: {:?}", err);
-            return Err(err.into());
-        }
-    };
-
     let vote_result = match grpc
         .lock()
         .await
@@ -134,7 +121,12 @@ async fn handle(
 
     tracing::info!("received vote response: {:?}", vote_result);
 
-    Ok(result)
+    Ok(Json(ResultBody { doc_count }))
+}
+
+#[derive(Serialize)]
+struct ResultBody {
+    doc_count: u64,
 }
 
 #[derive(Debug, Error)]
@@ -143,8 +135,6 @@ pub enum ServeError {
     JsonErr(#[from] JsonRejection),
     #[error("a database error occurred: {0}")]
     DatabaseErr(#[from] mongodb::error::Error),
-    #[error("failed to serialize response: {0}")]
-    SerializeError(#[from] serde_json::error::Error),
     #[error("failed to publish to rabbit: {0}")]
     RabbitError(#[from] PublishError),
     #[error("grpc call failed: {0}")]
@@ -156,7 +146,6 @@ impl IntoResponse for ServeError {
         let code = match self {
             ServeError::JsonErr(_) => StatusCode::BAD_REQUEST,
             ServeError::DatabaseErr(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            ServeError::SerializeError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ServeError::RabbitError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ServeError::GrpcError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
