@@ -1768,6 +1768,8 @@ dependencies = [
  "anyhow",
  "axum",
  "futures-lite",
+ "futures-util",
+ "hyper",
  "lapin",
  "mongodb",
  "prost",

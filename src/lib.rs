@@ -1,3 +1,5 @@
+extern crate core;
+
 pub mod db;
 pub mod grpc;
 pub mod rabbit;

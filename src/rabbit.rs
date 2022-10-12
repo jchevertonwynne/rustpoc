@@ -28,10 +28,8 @@ pub struct Rabbit {
 }
 
 impl Rabbit {
-    pub async fn new(_address: &str) -> lapin::Result<Rabbit> {
-        let conn =
-            Connection::connect("amqp://127.0.0.1:5672/%2f", ConnectionProperties::default())
-                .await?;
+    pub async fn new(address: &str) -> lapin::Result<Rabbit> {
+        let conn = Connection::connect(address, ConnectionProperties::default()).await?;
 
         let field_table = {
             let mut ft = FieldTable::default();

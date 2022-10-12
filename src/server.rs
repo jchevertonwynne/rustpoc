@@ -10,6 +10,7 @@ use mongodb::bson::oid::ObjectId;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_with::serde_as;
+use serde_with::DisplayFromStr;
 
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -18,7 +19,7 @@ use tokio::sync::Mutex;
 use tonic::transport::Channel;
 use tower_http::add_extension::AddExtensionLayer;
 
-use crate::db::{DataBase, COLLECTION};
+use crate::db::{ChosenCollection, DataBase, Object};
 use crate::grpc::voting_client::VotingClient;
 use crate::grpc::voting_request::Vote;
 use crate::grpc::VotingRequest;
@@ -43,7 +44,7 @@ impl Server {
         Server { router }
     }
 
-    pub async fn run(self, listener: std::net::TcpListener) -> anyhow::Result<()> {
+    pub async fn run(self, listener: std::net::TcpListener) -> Result<(), RunError> {
         axum::Server::from_tcp(listener)?
             .serve(self.router.into_make_service())
             .await?;
@@ -54,7 +55,9 @@ impl Server {
 #[derive(Error, Debug)]
 pub enum RunError {
     #[error("failed to create server from tcp listener: {0}")]
-    CreateListenerError(#[from] axum::Error),
+    FromTCPError(#[from] hyper::Error),
+    #[error("failed to serve: {0}")]
+    ServeError(#[from] axum::Error),
 }
 
 async fn bugsnag_non_200s<B>(req: Request<B>, next: Next<B>) -> Result<Response, StatusCode> {
@@ -84,13 +87,13 @@ async fn handle(
         }
     };
 
-    let col = mongo.collection(COLLECTION);
-    if let Err(err) = col.insert_one(body.clone(), None).await {
+    let col = mongo.collection::<Object>(ChosenCollection::Sample);
+    if let Err(err) = col.insert(body.clone()).await {
         tracing::error!("failed to insert doc to mongo: {:?}", err);
         return Err(err.into());
     }
 
-    let doc_count = match col.count_documents(None, None).await {
+    let doc_count = match col.count().await {
         Ok(count) => count,
         Err(err) => {
             tracing::error!("failed to count mongo docs: {:?}", err);
@@ -156,10 +159,10 @@ impl IntoResponse for ServeError {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Body {
-    // #[serde_as(as = "DisplayFromStr")]
+    #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "gamesConsoleConnectorId")]
     games_console_connector_id: ObjectId,
-    // #[serde_as(as = "DisplayFromStr")]
+    #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "projectId")]
     project_id: ObjectId,
     #[serde(rename = "type")]
@@ -170,4 +173,26 @@ pub struct Body {
     old_status: String,
     #[serde(rename = "newStatus")]
     new_status: String,
+}
+
+impl From<Body> for Object {
+    fn from(body: Body) -> Self {
+        let Body {
+            games_console_connector_id,
+            project_id,
+            connector_type,
+            triggered_at,
+            old_status,
+            new_status,
+        } = body;
+
+        Self {
+            games_console_connector_id,
+            project_id,
+            connector_type,
+            triggered_at,
+            old_status,
+            new_status,
+        }
+    }
 }

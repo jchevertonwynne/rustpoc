@@ -19,10 +19,13 @@ async fn main() -> anyhow::Result<()> {
         .with_line_number(true)
         .init();
 
-    rustpoc::grpc::run_server(
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    let handle = rustpoc::grpc::run_server(
         "127.0.0.1:3001"
             .parse()
             .context("failed to parse address")?,
+        rx,
     );
 
     let database = Arc::new(DataBase::new({
@@ -68,6 +71,13 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Server::new(rabbit, database, client);
     app.run(listener).await.context("app run failed")?;
+
+    tx.send(()).expect("failed to send shutdown message");
+
+    handle
+        .await
+        .context("handle failure")?
+        .context("tonic server failure")?;
 
     Ok(())
 }
