@@ -41,11 +41,12 @@ impl Voting for VotingService {
 pub fn run_server(address: SocketAddr, shutdown: Receiver<()>) -> JoinHandle<Result<(), Error>> {
     let server = Server::builder()
         .add_service(VotingServer::new(VotingService::default()))
-        .serve_with_shutdown(address, shutdown.map(|inner| {
-            match inner {
+        .serve_with_shutdown(
+            address,
+            shutdown.map(|inner| match inner {
                 Ok(_) => (),
                 Err(err) => panic!("failed to receive shutdown signal: {:?}", err),
-            }
-        }));
+            }),
+        );
     tokio::spawn(server)
 }

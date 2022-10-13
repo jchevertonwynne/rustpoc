@@ -1,6 +1,6 @@
 use std::fmt::Debug;
+use std::str::Utf8Error;
 
-use anyhow::Context;
 use futures_lite::StreamExt;
 use lapin::{
     message::Delivery,
@@ -9,7 +9,7 @@ use lapin::{
         QueueBindOptions, QueueDeclareOptions,
     },
     publisher_confirm::Confirmation,
-    types::{AMQPValue, FieldTable, LongString, ShortString},
+    types::{AMQPValue, FieldTable},
     BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind,
 };
 use serde::{de::DeserializeOwned, Serialize};
@@ -34,13 +34,10 @@ impl Rabbit {
         let field_table = {
             let mut ft = FieldTable::default();
             ft.insert(
-                ShortString::from("message_type"),
-                AMQPValue::LongString(LongString::from(MESSAGE_TYPE)),
+                "message_type".into(),
+                AMQPValue::LongString(MESSAGE_TYPE.into()),
             );
-            ft.insert(
-                ShortString::from("x-match"),
-                AMQPValue::LongString(LongString::from("all")),
-            );
+            ft.insert("x-match".into(), AMQPValue::LongString("all".into()));
             ft
         };
 
@@ -101,8 +98,8 @@ impl Rabbit {
         tracing::info!("about to publish {}", body);
         let mut ft = self.field_table.clone();
         ft.insert(
-            ShortString::from("content-type"),
-            AMQPValue::LongString(LongString::from("application/json")),
+            "content-type".into(),
+            AMQPValue::LongString("application/json".into()),
         );
         Ok(self
             .chan
@@ -184,21 +181,20 @@ pub enum ConsumeError {
 async fn process_delivery<T: DeserializeOwned + Debug>(
     delivery: &Delivery,
     header: &str,
-) -> anyhow::Result<()> {
+) -> Result<(), ProcessError> {
     let message_type_header = std::str::from_utf8(
         delivery
             .properties
             .headers()
             .as_ref()
-            .context("no headers found")?
+            .ok_or(ProcessError::NoHeaders)?
             .inner()
             .get("message_type")
-            .context("expected a message type header")?
+            .ok_or(ProcessError::NoMessageTypeHeader)?
             .as_long_string()
-            .context("expected a long string")?
+            .ok_or(ProcessError::NonLongString)?
             .as_bytes(),
-    )
-    .context("unable to parse to string")?;
+    )?;
 
     if message_type_header != header {
         tracing::error!(
@@ -209,10 +205,23 @@ async fn process_delivery<T: DeserializeOwned + Debug>(
         return Ok(());
     }
 
-    let received: T =
-        serde_json::from_slice(&delivery.data).context("failed to deserialize data")?;
+    let received: T = serde_json::from_slice(&delivery.data)?;
 
     tracing::info!("received rabbit msg: {:?}", received);
 
     Ok(())
+}
+
+#[derive(Error, Debug)]
+pub enum ProcessError {
+    #[error("failed to parse header string: {0}")]
+    HeaderParseError(#[from] Utf8Error),
+    #[error("failed to deserialize message: {0}")]
+    DeserializeError(#[from] serde_json::Error),
+    #[error("no headers on the rabbit message")]
+    NoHeaders,
+    #[error("message-type header was missing")]
+    NoMessageTypeHeader,
+    #[error("message-type header was the wrong type")]
+    NonLongString,
 }

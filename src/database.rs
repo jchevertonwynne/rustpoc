@@ -1,8 +1,6 @@
 use mongodb::bson::oid::ObjectId;
-use mongodb::bson::Document;
 
 use mongodb::{options::ClientOptions, Client};
-use rustpoc::server::Body;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -17,39 +15,33 @@ async fn main() -> anyhow::Result<()> {
     // Get a handle to the deployment.
     let client = Client::with_options(client_options)?;
 
-    // client
-    //     .database("joseph")
-    //     .create_collection("sample", CreateCollectionOptions::default())
-    //     .await?;
+    let mut cursor = client
+        .database("bugsnag_development")
+        .collection::<Account>("accounts")
+        .find(None, None)
+        .await?;
 
-    client
-        .database("joseph")
-        .collection::<Body>("sample")
-        .delete_many(Document::default(), None)
-        .await
-        .unwrap();
+    loop {
+        if !cursor.advance().await? {
+            break;
+        }
 
-    // let mut cursor = client
-    //     .database("bugsnag_development")
-    //     .collection::<Account>("accounts")
-    //     .find(None, None)
-    //     .await?;
-    //
-    // loop {
-    //     if !cursor.advance().await? {
-    //         break;
-    //     }
-    //
-    //     let account = cursor.deserialize_current()?;
-    //     println!("{:?}", account.id);
-    // }
+        let account = cursor.deserialize_current()?;
+        println!("{:?}", account.id);
+    }
 
     Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Account {
+struct Account {
     #[serde(rename = "_id")]
-    pub id: ObjectId,
+    id: ObjectId,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct GamesConsoleConnector {
+    #[serde(rename="_id")]
+    id: ObjectId,
 }
