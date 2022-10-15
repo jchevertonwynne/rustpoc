@@ -114,7 +114,11 @@ impl Rabbit {
             .await?)
     }
 
-    pub async fn consume<T>(&self, message_type_header: &'static str) -> Result<(), ConsumeError>
+    pub async fn consume<T>(
+        &self,
+        message_type_header: &'static str,
+        mut receiver: Receiver<()>,
+    ) -> Result<JoinHandle<()>, lapin::Error>
     where
         T: DeserializeOwned + Debug,
     {
@@ -128,14 +132,21 @@ impl Rabbit {
             )
             .await?;
 
-        tokio::spawn(async move {
+        Ok(tokio::spawn(async move {
             tracing::info!("started consumer of message {}", message_type_header);
             loop {
-                let received = match consumer.next().await {
-                    Some(received) => received,
-                    None => {
-                        tracing::error!("no value received");
-                        continue;
+                let received = tokio::select! {
+                    received = consumer.next() => {
+                        match received {
+                            Some(received) => received,
+                            None => {
+                                tracing::error!("no value received");
+                                continue;
+                            }
+                        }
+                    },
+                    _ = receiver.recv() => {
+                        return;
                     }
                 };
 
@@ -155,13 +166,13 @@ impl Rabbit {
                     tracing::error!("failed to ack: {:?}", err);
                 }
             }
-        });
-
-        Ok(())
+        }))
     }
 }
 
 use thiserror::Error;
+use tokio::sync::broadcast::Receiver;
+use tokio::task::JoinHandle;
 
 #[derive(Error, Debug)]
 pub enum PublishError {

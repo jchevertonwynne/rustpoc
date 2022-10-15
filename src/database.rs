@@ -42,6 +42,6 @@ struct Account {
 
 #[derive(Serialize, Debug, Clone)]
 struct GamesConsoleConnector {
-    #[serde(rename="_id")]
+    #[serde(rename = "_id")]
     id: ObjectId,
 }

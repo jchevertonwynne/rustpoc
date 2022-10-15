@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
-use axum::http::Request;
-use axum::middleware::{from_fn, Next};
+
 use axum::response::Response;
+use axum::routing::post;
 use axum::{http::StatusCode, response::IntoResponse, Extension, Json, Router};
+
 use mongodb::bson::oid::ObjectId;
 
 use serde::Deserialize;
@@ -14,6 +15,7 @@ use serde_with::DisplayFromStr;
 
 use thiserror::Error;
 use time::OffsetDateTime;
+use tokio::sync::broadcast::Receiver;
 use tokio::sync::Mutex;
 
 use tonic::transport::Channel;
@@ -24,6 +26,7 @@ use crate::grpc::voting_client::VotingClient;
 use crate::grpc::voting_request::Vote;
 use crate::grpc::VotingRequest;
 use crate::rabbit::{PublishError, Rabbit};
+use crate::Holder;
 
 pub struct Server {
     router: Router,
@@ -36,18 +39,23 @@ impl Server {
         grpc_client: Arc<Mutex<VotingClient<Channel>>>,
     ) -> Server {
         let router = Router::new()
-            .route("/", axum::routing::post(handle))
+            .route("/divide", post(divide))
+            .route("/", post(handle))
             .layer(AddExtensionLayer::new(rabbit))
             .layer(AddExtensionLayer::new(database))
-            .layer(AddExtensionLayer::new(grpc_client))
-            .route_layer(from_fn(bugsnag_non_200s));
+            .layer(AddExtensionLayer::new(grpc_client));
         Server { router }
     }
 
-    pub async fn run(self, listener: std::net::TcpListener) -> Result<(), RunError> {
+    pub async fn run(
+        self,
+        listener: std::net::TcpListener,
+        receiver: Receiver<()>,
+    ) -> Result<(), RunError> {
         axum::Server::from_tcp(listener)?
             .serve(self.router.into_make_service())
-            .await?;
+            .with_graceful_shutdown(Holder::new(receiver)).await?;
+
         Ok(())
     }
 }
@@ -60,17 +68,26 @@ pub enum RunError {
     ServeError(#[from] axum::Error),
 }
 
-async fn bugsnag_non_200s<B>(req: Request<B>, next: Next<B>) -> Result<Response, StatusCode> {
-    let resp = next.run(req).await;
+async fn divide(
+    Json(DivideRequest {
+        numerator,
+        denominator,
+    }): Json<DivideRequest>,
+) -> Json<DivideResult> {
+    Json(DivideResult {
+        result: numerator / denominator,
+    })
+}
 
-    if resp.status() != StatusCode::OK {
-        tracing::info!(
-            "lmao, a request failed: code = {}, please bugsnag me",
-            resp.status()
-        );
-    }
+#[derive(Deserialize)]
+pub struct DivideRequest {
+    numerator: isize,
+    denominator: isize,
+}
 
-    Ok(resp)
+#[derive(Serialize)]
+pub struct DivideResult {
+    result: isize,
 }
 
 async fn handle(
@@ -88,6 +105,7 @@ async fn handle(
     };
 
     let col = mongo.collection::<Object>(ChosenCollection::Sample);
+
     if let Err(err) = col.insert(body.clone()).await {
         tracing::error!("failed to insert doc to mongo: {:?}", err);
         return Err(err.into());
