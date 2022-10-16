@@ -1775,7 +1775,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with 2.0.1",
- "signal-hook",
  "thiserror",
  "time 0.3.15",
  "tokio",
@@ -1999,16 +1998,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "900fba806f70c630b0a382d0d825e17a0f19fcd059a2ade1ff237bcddf446b31"
 dependencies = [
  "lazy_static",
-]
-
-[[package]]
-name = "signal-hook"
-version = "0.3.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a253b5e89e2698464fc26b545c9edceb338e18a89effeeecfea192c3025be29d"
-dependencies = [
- "libc",
- "signal-hook-registry",
 ]
 
 [[package]]

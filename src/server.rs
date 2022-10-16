@@ -12,7 +12,6 @@ use serde_with::serde_as;
 use serde_with::DisplayFromStr;
 use thiserror::Error;
 use time::OffsetDateTime;
-use tokio::sync::broadcast::Receiver;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 use tower_http::add_extension::AddExtensionLayer;
@@ -22,7 +21,6 @@ use crate::grpc::voting_client::VotingClient;
 use crate::grpc::voting_request::Vote;
 use crate::grpc::VotingRequest;
 use crate::rabbit::{PublishError, Rabbit};
-use crate::Holder;
 
 pub struct Server {
     router: Router,
@@ -46,11 +44,11 @@ impl Server {
     pub fn build_server(
         self,
         listener: std::net::TcpListener,
-        receiver: Receiver<()>,
+        receiver: impl Send + Future<Output = ()>,
     ) -> Result<impl Send + Future<Output = Result<(), hyper::Error>>, RunError> {
         let server = axum::Server::from_tcp(listener)?
             .serve(self.router.into_make_service())
-            .with_graceful_shutdown(Holder::new(receiver));
+            .with_graceful_shutdown(receiver);
         Ok(server)
     }
 }

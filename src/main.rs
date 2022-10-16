@@ -5,8 +5,6 @@ use std::time::Duration;
 
 use anyhow::Context;
 use mongodb::options::ClientOptions;
-use signal_hook::consts::SIGINT;
-use signal_hook::iterator::Signals;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::sync::Mutex;
 
@@ -23,13 +21,17 @@ async fn main() -> anyhow::Result<()> {
         .with_line_number(true)
         .init();
 
-    let (tx, rx): (Sender<()>, Receiver<()>) = tokio::sync::broadcast::channel(1);
+    let (tx, mut rx): (Sender<()>, Receiver<()>) = tokio::sync::broadcast::channel(1);
+
+    let killer = async move {
+        rx.recv().await.expect("TODO: panic message");
+    };
 
     let grpc_handle = tokio::spawn(rustpoc::grpc::run_server(
         "127.0.0.1:3001"
             .parse()
             .context("failed to parse address")?,
-        rx,
+        killer,
     ));
 
     let database = Arc::new(DataBase::new({
@@ -75,18 +77,22 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 3000)))
         .context("failed to bind tcp listener to port")?;
 
+    let mut rx = tx.subscribe();
+    let killer = async move {
+        rx.recv().await.expect("TODO: panic message");
+    };
+
     let app = Server::new(rabbit, database, client)
-        .build_server(listener, tx.subscribe())
+        .build_server(listener, killer)
         .context("failed to build server")?;
 
     let axum_handle = tokio::spawn(app);
 
-    Signals::new(&[SIGINT])
-        .context("failed to prepare signal handler")?
-        .forever()
-        .next();
+    tokio::signal::ctrl_c()
+        .await
+        .context("failed to receive ctrl c")?;
 
-    tx.send(()).expect("failed to send shutdown message");
+    tx.send(()).context("failed to send shutdown message")?;
 
     std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(10));
