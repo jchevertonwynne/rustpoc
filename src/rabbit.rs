@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::future::Future;
 use std::str::Utf8Error;
 
 use futures_lite::StreamExt;
@@ -13,6 +14,8 @@ use lapin::{
     BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind,
 };
 use serde::{de::DeserializeOwned, Serialize};
+use thiserror::Error;
+use tokio::sync::broadcast::Receiver;
 
 const QUEUE: &str = "queue-joseph";
 const EXCHANGE: &str = "exchange-joseph";
@@ -118,7 +121,7 @@ impl Rabbit {
         &self,
         message_type_header: &'static str,
         mut receiver: Receiver<()>,
-    ) -> Result<JoinHandle<()>, lapin::Error>
+    ) -> Result<impl Future<Output = ()>, lapin::Error>
     where
         T: DeserializeOwned + Debug,
     {
@@ -132,7 +135,7 @@ impl Rabbit {
             )
             .await?;
 
-        Ok(tokio::spawn(async move {
+        Ok(async move {
             tracing::info!("started consumer of message {}", message_type_header);
             loop {
                 let received = tokio::select! {
@@ -166,13 +169,9 @@ impl Rabbit {
                     tracing::error!("failed to ack: {:?}", err);
                 }
             }
-        }))
+        })
     }
 }
-
-use thiserror::Error;
-use tokio::sync::broadcast::Receiver;
-use tokio::task::JoinHandle;
 
 #[derive(Error, Debug)]
 pub enum PublishError {

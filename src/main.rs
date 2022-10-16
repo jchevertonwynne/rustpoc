@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::net::TcpListener;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use mongodb::options::ClientOptions;
@@ -24,12 +25,12 @@ async fn main() -> anyhow::Result<()> {
 
     let (tx, rx): (Sender<()>, Receiver<()>) = tokio::sync::broadcast::channel(1);
 
-    let grpc_handle = rustpoc::grpc::run_server(
+    let grpc_handle = tokio::spawn(rustpoc::grpc::run_server(
         "127.0.0.1:3001"
             .parse()
             .context("failed to parse address")?,
         rx,
-    );
+    ));
 
     let database = Arc::new(DataBase::new({
         let mut client_options = ClientOptions::parse("mongodb://localhost:27017").await?;
@@ -54,10 +55,12 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("checked rabbit queue and exchange bindings");
 
-    let rabbit_consume_handle = rabbit
-        .consume::<Body>(MESSAGE_TYPE, tx.subscribe())
-        .await
-        .context("failed to start consumer")?;
+    let rabbit_consume_handle = tokio::spawn(
+        rabbit
+            .consume::<Body>(MESSAGE_TYPE, tx.subscribe())
+            .await
+            .context("failed to start consumer")?,
+    );
 
     tracing::info!("setup message listener");
 
@@ -72,10 +75,11 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 3000)))
         .context("failed to bind tcp listener to port")?;
 
-    let app = Server::new(rabbit, database, client);
+    let app = Server::new(rabbit, database, client)
+        .build_server(listener, tx.subscribe())
+        .context("failed to build server")?;
 
-    let rx = tx.subscribe();
-    let axum_handle = tokio::spawn(async { app.run(listener, rx).await });
+    let axum_handle = tokio::spawn(app);
 
     Signals::new(&[SIGINT])
         .context("failed to prepare signal handler")?
@@ -83,6 +87,12 @@ async fn main() -> anyhow::Result<()> {
         .next();
 
     tx.send(()).expect("failed to send shutdown message");
+
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(10));
+        tracing::error!("shutting down manually");
+        std::process::exit(1);
+    });
 
     tracing::info!("end of program");
 

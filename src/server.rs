@@ -1,23 +1,19 @@
+use std::future::Future;
 use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
-
 use axum::response::Response;
 use axum::routing::post;
 use axum::{http::StatusCode, response::IntoResponse, Extension, Json, Router};
-
 use mongodb::bson::oid::ObjectId;
-
 use serde::Deserialize;
 use serde::Serialize;
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
-
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::Mutex;
-
 use tonic::transport::Channel;
 use tower_http::add_extension::AddExtensionLayer;
 
@@ -47,16 +43,15 @@ impl Server {
         Server { router }
     }
 
-    pub async fn run(
+    pub fn build_server(
         self,
         listener: std::net::TcpListener,
         receiver: Receiver<()>,
-    ) -> Result<(), RunError> {
-        axum::Server::from_tcp(listener)?
+    ) -> Result<impl Send + Future<Output = Result<(), hyper::Error>>, RunError> {
+        let server = axum::Server::from_tcp(listener)?
             .serve(self.router.into_make_service())
-            .with_graceful_shutdown(Holder::new(receiver)).await?;
-
-        Ok(())
+            .with_graceful_shutdown(Holder::new(receiver));
+        Ok(server)
     }
 }
 

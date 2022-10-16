@@ -1,14 +1,13 @@
 use crate::grpc::voting_request::Vote;
 use crate::grpc::voting_server::{Voting, VotingServer};
+use std::future::Future;
 
 use std::net::SocketAddr;
-
 use tokio::sync::broadcast::Receiver;
-use tokio::task::JoinHandle;
-
-use crate::Holder;
 use tonic::transport::Server;
 use tonic::{Code, Request, Response, Status};
+
+use crate::Holder;
 
 // reference: https://www.thorsten-hans.com/grpc-services-in-rust-with-tonic/
 
@@ -40,14 +39,14 @@ impl Voting for VotingService {
     }
 }
 
-pub fn run_server(address: SocketAddr, shutdown: Receiver<()>) -> JoinHandle<()> {
+pub fn run_server(address: SocketAddr, shutdown: Receiver<()>) -> impl Future<Output = ()> {
     let server = Server::builder()
         .add_service(VotingServer::new(VotingService::default()))
         .serve_with_shutdown(address, Holder::new(shutdown));
-    tokio::spawn(async {
+    async {
         match server.await {
             Ok(_) => {}
             Err(err) => tracing::error!("failure in serving grpc server: {:?}", err),
         }
-    })
+    }
 }
