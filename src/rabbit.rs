@@ -3,7 +3,6 @@ use std::str::Utf8Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::server::Body;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use lapin::{options::{
@@ -12,6 +11,7 @@ use lapin::{options::{
 }, publisher_confirm::Confirmation, types::{AMQPValue, FieldTable}, BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind, Consumer};
 use lapin::options::BasicAckOptions;
 use lapin::protocol::constants::REPLY_SUCCESS;
+use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -212,9 +212,17 @@ pub enum BodyConsumerError {
     SerdeError(#[from] serde_json::Error),
 }
 
+#[derive(Deserialize, Debug)]
+pub struct MsgBody<'a> {
+    #[serde(rename = "gamesConsoleConnectorId")]
+    connector_id: ObjectId,
+    #[serde(rename = "type")]
+    connector_type: &'a str,
+}
+
 #[async_trait]
 impl RabbitConsumer for BodyConsumer {
-    type Message<'a> = Body;
+    type Message<'a> = MsgBody<'a>;
     type ConsumerError = BodyConsumerError;
 
     fn header_matches(&self, header: &str) -> bool {
@@ -297,10 +305,8 @@ impl<A, B> RabbitDelegator for (Arc<A>, Arc<B>)
         B: RabbitConsumer,
 {
     fn delegate(&self, header: &str, contents: Vec<u8>) -> bool {
-        let (a, b) = self;
-        let a = Arc::clone(a);
+        let (a, b) = self.clone();
         header_matcher!(a, header, contents);
-        let b = Arc::clone(b);
         header_matcher!(b, header, contents);
         false
     }
