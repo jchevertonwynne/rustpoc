@@ -1,23 +1,21 @@
 use std::fmt::Debug;
-use std::future::Future;
 use std::str::Utf8Error;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-use futures_lite::StreamExt;
-use lapin::{
-    message::Delivery,
-    options::{
-        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions,
-        QueueBindOptions, QueueDeclareOptions,
-    },
-    publisher_confirm::Confirmation,
-    types::{AMQPValue, FieldTable},
-    BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind,
-};
-use serde::{de::DeserializeOwned, Serialize};
+use crate::server::Body;
+use async_trait::async_trait;
+use futures_util::StreamExt;
+use lapin::{options::{
+    BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions, QueueBindOptions,
+    QueueDeclareOptions,
+}, publisher_confirm::Confirmation, types::{AMQPValue, FieldTable}, BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind, Consumer};
+use lapin::options::BasicAckOptions;
+use lapin::protocol::constants::REPLY_SUCCESS;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::broadcast::Receiver;
 
-const QUEUE: &str = "queue-joseph";
+pub const QUEUE: &str = "queue-joseph";
 const EXCHANGE: &str = "exchange-joseph";
 const ROUTING: &str = "";
 const CONSUMER_TAG: &str = "joseph-consumer";
@@ -96,6 +94,10 @@ impl Rabbit {
         Ok(())
     }
 
+    pub async fn close(&self) -> Result<(), lapin::Error> {
+        self.conn.close(REPLY_SUCCESS, "thank you!").await
+    }
+
     pub async fn publish_json(&self, body: impl Serialize) -> Result<Confirmation, PublishError> {
         let body = serde_json::to_string(&body)?;
         tracing::info!("about to publish {}", body);
@@ -117,59 +119,55 @@ impl Rabbit {
             .await?)
     }
 
-    pub async fn consume<T>(
-        &self,
-        message_type_header: &'static str,
-        mut receiver: Receiver<()>,
-    ) -> Result<impl Future<Output = ()>, lapin::Error>
-    where
-        T: DeserializeOwned + Debug,
+    pub async fn consume<D>(&self, queue: &str, rabbit_delegator: D) -> Result<(), lapin::Error>
+        where
+            D: RabbitDelegator,
     {
-        let mut consumer = self
-            .chan
+        let chan = self.chan.clone();
+        let consumer = chan
             .basic_consume(
-                QUEUE,
+                queue,
                 CONSUMER_TAG,
                 BasicConsumeOptions::default(),
                 self.field_table.clone(),
             )
             .await?;
 
-        Ok(async move {
-            tracing::info!("started consumer of message {}", message_type_header);
-            loop {
-                let received = tokio::select! {
-                    received = consumer.next() => {
-                        match received {
-                            Some(received) => received,
-                            None => {
-                                tracing::error!("no value received");
-                                continue;
-                            }
-                        }
-                    },
-                    _ = receiver.recv() => {
-                        return;
-                    }
-                };
+        tokio::spawn(run_delegator(consumer, chan, rabbit_delegator));
 
-                let delivery = match received {
-                    Ok(delivery) => delivery,
-                    Err(err) => {
-                        tracing::error!("failed to get message delivery: {:?}", err);
-                        continue;
-                    }
-                };
+        Ok(())
+    }
+}
 
-                if let Err(err) = process_delivery::<T>(&delivery, message_type_header).await {
-                    tracing::error!("failed to process rabbit message: {:?}", err);
+async fn run_delegator<D: RabbitDelegator>(mut consumer: Consumer, chan: Channel, delegator: D) {
+    loop {
+        match consumer.next().await {
+            None => {}
+            Some(Ok(delivery)) => {
+                let header = delivery
+                    .properties
+                    .headers()
+                    .as_ref()
+                    .unwrap()
+                    .inner()
+                    .get("message_type")
+                    .expect("messages should always have message_type header")
+                    .as_long_string()
+                    .expect("message_type header should be a long string")
+                    .to_string();
+
+                if !delegator.delegate(&header, delivery.data) {
+                    eprintln!("failed to delegate message with header {}", header);
                 }
 
-                if let Err(err) = delivery.ack(BasicAckOptions::default()).await {
-                    tracing::error!("failed to ack: {:?}", err);
+                if let Err(err) = chan.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).await {
+                    eprint!("failed to ack delivery: {}", err);
                 }
             }
-        })
+            Some(Err(err)) => {
+                eprintln!("error polling consumer: {}", err);
+            }
+        }
     }
 }
 
@@ -180,46 +178,13 @@ pub enum PublishError {
     #[error("rabbit operation failed: {0}")]
     RabbitError(#[from] lapin::Error),
 }
+
 #[derive(Error, Debug)]
 pub enum ConsumeError {
     #[error("failed to serialize struct: {0}")]
     SerializeError(#[from] serde_json::error::Error),
     #[error("rabbit operation failed: {0}")]
     RabbitError(#[from] lapin::Error),
-}
-
-async fn process_delivery<T: DeserializeOwned + Debug>(
-    delivery: &Delivery,
-    header: &str,
-) -> Result<(), ProcessError> {
-    let message_type_header = std::str::from_utf8(
-        delivery
-            .properties
-            .headers()
-            .as_ref()
-            .ok_or(ProcessError::NoHeaders)?
-            .inner()
-            .get("message_type")
-            .ok_or(ProcessError::NoMessageTypeHeader)?
-            .as_long_string()
-            .ok_or(ProcessError::NonLongString)?
-            .as_bytes(),
-    )?;
-
-    if message_type_header != header {
-        tracing::error!(
-            "headers did not match: {} != {}",
-            message_type_header,
-            header
-        );
-        return Ok(());
-    }
-
-    let received: T = serde_json::from_slice(&delivery.data)?;
-
-    tracing::info!("received rabbit msg: {:?}", received);
-
-    Ok(())
 }
 
 #[derive(Error, Debug)]
@@ -234,4 +199,109 @@ pub enum ProcessError {
     NoMessageTypeHeader,
     #[error("message-type header was the wrong type")]
     NonLongString,
+}
+
+#[derive(Default)]
+pub struct BodyConsumer {
+    count: AtomicUsize,
+}
+
+#[derive(Error, Debug)]
+pub enum BodyConsumerError {
+    #[error("failed to parse message body: {0}")]
+    SerdeError(#[from] serde_json::Error),
+}
+
+#[async_trait]
+impl RabbitConsumer for BodyConsumer {
+    type Message<'a> = Body;
+    type ConsumerError = BodyConsumerError;
+
+    fn header_matches(&self, header: &str) -> bool {
+        header == "msg-joseph"
+    }
+
+    async fn process(self: Arc<Self>, msg: Self::Message<'_>, _raw: &[u8]) -> Result<(), Self::ConsumerError> {
+        let count = self.count.fetch_add(1, Ordering::SeqCst) + 1;
+        println!("processing message {:?}, total: {}", msg, count);
+        Ok(())
+    }
+}
+
+impl From<BodyConsumerError> for DelegatorError {
+    fn from(_: BodyConsumerError) -> Self {
+        DelegatorError
+    }
+}
+
+#[async_trait]
+pub trait RabbitConsumer: Sync + Send + 'static {
+    type Message<'a>: Deserialize<'a> + Send;
+    type ConsumerError: Into<DelegatorError> + From<serde_json::Error> + std::error::Error;
+
+    fn header_matches(&self, header: &str) -> bool;
+
+    fn parse_msg<'a>(&self, contents: &'a [u8]) -> Result<Self::Message<'a>, Self::ConsumerError> {
+        serde_json::from_slice(contents).map_err(|err| err.into())
+    }
+
+    async fn process(self: Arc<Self>, msg: Self::Message<'_>, raw: &[u8]) -> Result<(), Self::ConsumerError>;
+
+    async fn try_process(self: Arc<Self>, contents: Vec<u8>) {
+        if let Err(err) = self.try_consume_inner(contents).await {
+            eprint!("err: {}", err);
+        }
+    }
+
+    async fn try_consume_inner(
+        self: Arc<Self>,
+        contents: Vec<u8>,
+    ) -> Result<(), Self::ConsumerError> {
+        let message = self.parse_msg(&contents)?;
+        self.process(message, &contents).await
+    }
+}
+
+#[async_trait]
+pub trait RabbitDelegator: Sync + Send + Clone + 'static {
+    fn delegate(&self, header: &str, contents: Vec<u8>) -> bool;
+}
+
+pub struct DelegatorError;
+
+macro_rules! header_matcher {
+    ($CONSUMER: expr, $HEADER: expr, $CONTENTS: expr) => {
+        if $CONSUMER.header_matches($HEADER) {
+            tokio::spawn($CONSUMER.try_process($CONTENTS));
+            return true;
+        }
+    };
+}
+
+#[async_trait]
+impl<T> RabbitDelegator for Arc<T>
+    where
+        T: RabbitConsumer,
+{
+    fn delegate(&self, header: &str, contents: Vec<u8>) -> bool {
+        let _self = Arc::clone(self);
+        header_matcher!(_self, header, contents);
+        false
+    }
+}
+
+#[async_trait]
+impl<A, B> RabbitDelegator for (Arc<A>, Arc<B>)
+    where
+        A: RabbitConsumer,
+        B: RabbitConsumer,
+{
+    fn delegate(&self, header: &str, contents: Vec<u8>) -> bool {
+        let (a, b) = self;
+        let a = Arc::clone(a);
+        header_matcher!(a, header, contents);
+        let b = Arc::clone(b);
+        header_matcher!(b, header, contents);
+        false
+    }
 }

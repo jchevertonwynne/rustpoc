@@ -21,11 +21,7 @@ async fn main() -> anyhow::Result<()> {
         .find(None, None)
         .await?;
 
-    loop {
-        if !cursor.advance().await? {
-            break;
-        }
-
+    while cursor.advance().await? {
         let account = cursor.deserialize_current()?;
         println!("{:?}", account.id);
     }

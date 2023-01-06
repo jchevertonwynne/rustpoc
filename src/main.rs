@@ -1,18 +1,15 @@
-use std::net::SocketAddr;
+use std::future::Future;
 use std::net::TcpListener;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Context;
 use mongodb::options::ClientOptions;
-use tokio::sync::broadcast::{Receiver, Sender};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use rustpoc::db::DataBase;
 use rustpoc::grpc::voting_client::VotingClient;
-use rustpoc::rabbit::Rabbit;
-use rustpoc::rabbit::MESSAGE_TYPE;
-use rustpoc::server::{Body, Server};
+use rustpoc::rabbit::{BodyConsumer, Rabbit, QUEUE};
+use rustpoc::server::Server;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -21,17 +18,13 @@ async fn main() -> anyhow::Result<()> {
         .with_line_number(true)
         .init();
 
-    let (tx, mut rx): (Sender<()>, Receiver<()>) = tokio::sync::broadcast::channel(1);
-
-    let killer = async move {
-        rx.recv().await.expect("TODO: panic message");
-    };
+    let shutdown = Killer::new();
 
     let grpc_handle = tokio::spawn(rustpoc::grpc::run_server(
         "127.0.0.1:3001"
             .parse()
             .context("failed to parse address")?,
-        killer,
+        shutdown.kill_signal(),
     ));
 
     let database = Arc::new(DataBase::new({
@@ -57,12 +50,12 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("checked rabbit queue and exchange bindings");
 
-    let rabbit_consume_handle = tokio::spawn(
-        rabbit
-            .consume::<Body>(MESSAGE_TYPE, tx.subscribe())
-            .await
-            .context("failed to start consumer")?,
-    );
+    let delegator = Arc::new(BodyConsumer::default());
+    // let delegator = (Arc::new(BodyConsumer::default()), Arc::new(SomeOtherConsumer::default()));
+    rabbit
+        .consume(QUEUE, delegator)
+        .await
+        .context("failed to start consumer")?;
 
     tracing::info!("setup message listener");
 
@@ -74,16 +67,11 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("grpc client connected");
 
-    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 3000)))
+    let listener = TcpListener::bind(("127.0.0.1", 2987))
         .context("failed to bind tcp listener to port")?;
 
-    let mut rx = tx.subscribe();
-    let killer = async move {
-        rx.recv().await.expect("TODO: panic message");
-    };
-
-    let app = Server::new(rabbit, database, client)
-        .build_server(listener, killer)
+    let app = Server::new(Arc::clone(&rabbit), database, client)
+        .build_server(listener, shutdown.kill_signal())
         .context("failed to build server")?;
 
     let axum_handle = tokio::spawn(app);
@@ -92,15 +80,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to receive ctrl c")?;
 
-    tx.send(()).context("failed to send shutdown message")?;
+    shutdown.kill();
 
-    std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_secs(10));
-        tracing::error!("shutting down manually");
-        std::process::exit(1);
-    });
-
-    tracing::info!("end of program");
+    tracing::info!("closing down program...");
 
     axum_handle
         .await
@@ -109,15 +91,34 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("axum shutdown");
 
+    rabbit.close().await.context("failed to close rabbit conn")?;
+
+    tracing::info!("rabbit shutdown");
+
     grpc_handle.await.context("tonic server failure")?;
 
     tracing::info!("tonic shutdown");
 
-    rabbit_consume_handle
-        .await
-        .context("rabbit shutdown failure")?;
-
-    tracing::info!("rabbit shutdown");
-
     Ok(())
+}
+
+struct Killer {
+    inner: Arc<Notify>,
+}
+
+impl Killer {
+    fn new() -> Killer {
+        Killer {
+            inner: Arc::new(Notify::new()),
+        }
+    }
+
+    fn kill_signal(&self) -> impl Future<Output = ()> {
+        let notify = Arc::clone(&self.inner);
+        async move { notify.notified().await }
+    }
+
+    fn kill(&self) {
+        self.inner.notify_waiters()
+    }
 }

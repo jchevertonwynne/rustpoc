@@ -17,8 +17,11 @@ path = "src/database.rs"
 
 [dependencies]
 anyhow = "1.0.65"
-axum = "0.5.16"
+async-trait = "0.1.60"
+axum = "0.6.1"
+axum-macros = "0.3.0"
 futures-lite = "1.12.0"
+futures-util = "0.3.25"
 hyper = { version = "0.14.20", features = ["full"] }
 lapin = "2.1.1"
 mongodb = "2.3.1"

@@ -2,9 +2,10 @@ use std::future::Future;
 use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
+use axum::extract::State;
 use axum::response::Response;
 use axum::routing::post;
-use axum::{http::StatusCode, response::IntoResponse, Extension, Json, Router};
+use axum::{http::StatusCode, response::IntoResponse, Json, Router};
 use mongodb::bson::oid::ObjectId;
 use serde::Deserialize;
 use serde::Serialize;
@@ -14,7 +15,6 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
-use tower_http::add_extension::AddExtensionLayer;
 
 use crate::db::{ChosenCollection, DataBase, Object};
 use crate::grpc::voting_client::VotingClient;
@@ -26,6 +26,13 @@ pub struct Server {
     router: Router,
 }
 
+#[derive(Clone, axum_macros::FromRef)]
+struct AppState {
+    rabbit: Arc<Rabbit>,
+    database: Arc<DataBase>,
+    grpc_client: Arc<Mutex<VotingClient<Channel>>>,
+}
+
 impl Server {
     pub fn new(
         rabbit: Arc<Rabbit>,
@@ -35,9 +42,11 @@ impl Server {
         let router = Router::new()
             .route("/divide", post(divide))
             .route("/", post(handle))
-            .layer(AddExtensionLayer::new(rabbit))
-            .layer(AddExtensionLayer::new(database))
-            .layer(AddExtensionLayer::new(grpc_client));
+            .with_state(AppState {
+                rabbit,
+                database,
+                grpc_client,
+            });
         Server { router }
     }
 
@@ -84,10 +93,10 @@ pub struct DivideResult {
 }
 
 async fn handle(
+    State(rabbit): State<Arc<Rabbit>>,
+    State(mongo): State<Arc<DataBase>>,
+    State(grpc): State<Arc<Mutex<VotingClient<Channel>>>>,
     res: Result<Json<Body>, JsonRejection>,
-    Extension(rabbit): Extension<Arc<Rabbit>>,
-    Extension(mongo): Extension<Arc<DataBase>>,
-    Extension(grpc): Extension<Arc<Mutex<VotingClient<Channel>>>>,
 ) -> Result<Json<ResultBody>, ServeError> {
     let body = match res {
         Ok(Json(body)) => body,
