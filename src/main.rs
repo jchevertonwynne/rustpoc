@@ -67,8 +67,8 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("grpc client connected");
 
-    let listener = TcpListener::bind(("127.0.0.1", 2987))
-        .context("failed to bind tcp listener to port")?;
+    let listener =
+        TcpListener::bind(("127.0.0.1", 2987)).context("failed to bind tcp listener to port")?;
 
     let app = Server::new(Arc::clone(&rabbit), database, client)
         .build_server(listener, shutdown.kill_signal())
@@ -91,7 +91,10 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("axum shutdown");
 
-    rabbit.close().await.context("failed to close rabbit conn")?;
+    rabbit
+        .close()
+        .await
+        .context("failed to close rabbit conn")?;
 
     tracing::info!("rabbit shutdown");
 

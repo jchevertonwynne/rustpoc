@@ -20,7 +20,7 @@ use crate::db::{ChosenCollection, DataBase, Object};
 use crate::grpc::voting_client::VotingClient;
 use crate::grpc::voting_request::Vote;
 use crate::grpc::VotingRequest;
-use crate::rabbit::{PublishError, Rabbit};
+use crate::rabbit::{PublishError, Rabbit, EXCHANGE, MESSAGE_TYPE};
 
 pub struct Server {
     router: Router,
@@ -121,7 +121,7 @@ async fn handle(
         }
     };
 
-    if let Err(err) = rabbit.publish_json(body).await {
+    if let Err(err) = rabbit.publish_json(EXCHANGE, MESSAGE_TYPE, body).await {
         tracing::error!("failed to publish rabbit msg: {:?}", err);
         return Err(err.into());
     }
