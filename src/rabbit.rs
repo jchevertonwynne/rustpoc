@@ -1,28 +1,21 @@
-use Ordering::SeqCst;
 use std::fmt::Debug;
-use std::future::Future;
-use std::pin::Pin;
-use std::str::Utf8Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use Ordering::SeqCst;
 
 use async_trait::async_trait;
-use lapin::message::DeliveryResult;
+use futures_lite::StreamExt;
 use lapin::options::BasicAckOptions;
 use lapin::protocol::constants::REPLY_SUCCESS;
 use lapin::types::AMQPValue::LongString;
-use lapin::{
-    options::{
-        BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions, QueueBindOptions,
-        QueueDeclareOptions,
-    },
-    publisher_confirm::Confirmation,
-    types::FieldTable,
-    BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind,
-};
+use lapin::{options::{
+    BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions, QueueBindOptions,
+    QueueDeclareOptions,
+}, publisher_confirm::Confirmation, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind, Consumer};
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub const QUEUE: &str = "queue-joseph";
 pub const EXCHANGE: &str = "exchange-joseph";
@@ -190,12 +183,50 @@ impl Rabbit {
             )
             .await?;
 
-        consumer.set_delegate(Delegator {
-            delegator: rabbit_delegator,
-            channel: self.chan.clone(),
-        });
+        tokio::spawn(run_consumer(rabbit_delegator, consumer, self.chan.clone()));
 
         Ok(())
+    }
+}
+
+async fn run_consumer(delegator: impl RabbitDelegator, mut consumer: Consumer, channel: Channel) {
+    let sema = Arc::new(Semaphore::new(10));
+
+    loop {
+        let permit = sema.clone().acquire_owned().await.unwrap();
+
+        let delivery = consumer.next().await;
+        let delivery = match delivery {
+            Some(Ok(delivery)) => delivery,
+            Some(Err(err)) => {
+                tracing::error!("error on delivery?: {}", err);
+                continue;
+            },
+            None => return,
+        };
+
+        let header = delivery
+            .properties
+            .headers()
+            .as_ref()
+            .unwrap()
+            .inner()
+            .get("message_type")
+            .expect("messages should always have message_type header")
+            .as_long_string()
+            .expect("message_type header should be a long string")
+            .to_string();
+
+        if !delegator.delegate(&header, delivery.data, permit) {
+            tracing::error!("failed to delegate message with header {}", header);
+        }
+
+        if let Err(err) = channel
+            .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
+            .await
+        {
+            tracing::error!("failed to ack msg: {}", err);
+        }
     }
 }
 
@@ -205,28 +236,6 @@ pub enum PublishError {
     SerializeError(#[from] serde_json::error::Error),
     #[error("rabbit operation failed: {0}")]
     RabbitError(#[from] lapin::Error),
-}
-
-#[derive(Error, Debug)]
-pub enum ConsumeError {
-    #[error("failed to serialize struct: {0}")]
-    SerializeError(#[from] serde_json::error::Error),
-    #[error("rabbit operation failed: {0}")]
-    RabbitError(#[from] lapin::Error),
-}
-
-#[derive(Error, Debug)]
-pub enum ProcessError {
-    #[error("failed to parse header string: {0}")]
-    HeaderParseError(#[from] Utf8Error),
-    #[error("failed to deserialize message: {0}")]
-    DeserializeError(#[from] serde_json::Error),
-    #[error("no headers on the rabbit message")]
-    NoHeaders,
-    #[error("message-type header was missing")]
-    NoMessageTypeHeader,
-    #[error("message-type header was the wrong type")]
-    NonLongString,
 }
 
 #[derive(Default)]
@@ -301,94 +310,44 @@ pub trait RabbitConsumer: Sync + Send + 'static {
     }
 }
 
-#[async_trait]
 pub trait RabbitDelegator: Clone + Send + Sync + 'static {
-    fn delegate(&self, header: &str, contents: Vec<u8>) -> bool;
+    fn delegate(&self, header: &str, contents: Vec<u8>, permit: OwnedSemaphorePermit) -> bool;
 }
 
 macro_rules! header_matcher {
-    ($CONSUMER: expr, $HEADER: expr, $CONTENTS: expr) => {
+    ($CONSUMER: expr, $HEADER: expr, $CONTENTS: expr, $PERMIT: expr) => {
         if $CONSUMER.header_matches($HEADER) {
             let consumer = Arc::clone($CONSUMER);
-            tokio::spawn(consumer.try_process($CONTENTS));
+            tokio::spawn(async move {
+                consumer.try_process($CONTENTS).await;
+                drop($PERMIT)
+            });
+
             return true;
         }
     };
 }
 
-#[async_trait]
 impl<T> RabbitDelegator for Arc<T>
 where
     T: RabbitConsumer,
 {
-    fn delegate(&self, header: &str, contents: Vec<u8>) -> bool {
-        header_matcher!(self, header, contents);
+    fn delegate(&self, header: &str, contents: Vec<u8>, permit: OwnedSemaphorePermit) -> bool {
+        header_matcher!(self, header, contents, permit);
         false
     }
 }
 
-#[async_trait]
 impl<A, B> RabbitDelegator for (Arc<A>, Arc<B>)
 where
     A: RabbitConsumer,
     B: RabbitConsumer,
 {
-    fn delegate(&self, header: &str, contents: Vec<u8>) -> bool {
+    fn delegate(&self, header: &str, contents: Vec<u8>, permit: OwnedSemaphorePermit) -> bool {
         tracing::info!("attempting to delegate: header = {}", header);
         let (a, b) = self;
-        header_matcher!(a, header, contents);
-        header_matcher!(b, header, contents);
+        header_matcher!(a, header, contents, permit);
+        header_matcher!(b, header, contents, permit);
         false
-    }
-}
-
-struct Delegator<D> {
-    delegator: D,
-    channel: Channel,
-}
-
-impl<D> lapin::ConsumerDelegate for Delegator<D>
-where
-    D: RabbitDelegator,
-{
-    fn on_new_delivery(
-        &self,
-        delivery: DeliveryResult,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let delegator = self.delegator.clone();
-        let channel = self.channel.clone();
-        Box::pin(async move {
-            let delivery = match delivery {
-                Ok(Some(delivery)) => delivery,
-                Ok(None) => return,
-                Err(err) => {
-                    tracing::error!("error on delivery?: {}", err);
-                    return;
-                }
-            };
-
-            let header = delivery
-                .properties
-                .headers()
-                .as_ref()
-                .unwrap()
-                .inner()
-                .get("message_type")
-                .expect("messages should always have message_type header")
-                .as_long_string()
-                .expect("message_type header should be a long string")
-                .to_string();
-
-            if !delegator.delegate(&header, delivery.data) {
-                tracing::error!("failed to delegate message with header {}", header);
-            }
-
-            if let Err(err) = channel
-                .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
-                .await
-            {
-                tracing::error!("failed to ack delivery: {}", err);
-            }
-        })
     }
 }

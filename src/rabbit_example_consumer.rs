@@ -5,9 +5,8 @@ use rustpoc::rabbit::{Rabbit, RabbitConsumer};
 use serde::Deserialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use Ordering::SeqCst;
-
 use tracing::Level;
+use Ordering::SeqCst;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -34,11 +33,11 @@ async fn main() -> anyhow::Result<()> {
 
     let delegator = (
         Arc::new(MyConsumer {
-            count: Default::default(),
+            count: AtomicUsize::default(),
             global_count: global_count.clone(),
         }),
         Arc::new(MyOtherConsumer {
-            count: Default::default(),
+            count: AtomicUsize::default(),
             global_count,
         }),
     );
@@ -99,7 +98,7 @@ impl RabbitConsumer for MyConsumer {
     #[tracing::instrument(
         name = "handling a received rabbit msg",
         skip(self, msg, _raw),
-        fields(name=msg.name, arms=msg.arms)
+        fields(name=msg.name, arms=msg.arms, header="header1")
     )]
     async fn process(
         self: Arc<Self>,
@@ -152,6 +151,11 @@ impl RabbitConsumer for MyOtherConsumer {
         header == "header2"
     }
 
+    #[tracing::instrument(
+        name = "handling an other received rabbit msg",
+        skip(self, msg, _raw),
+        fields(header = "header2")
+    )]
     async fn process(
         self: Arc<Self>,
         msg: Self::Message<'_>,
@@ -164,6 +168,8 @@ impl RabbitConsumer for MyOtherConsumer {
         let _enter = span.enter();
         some_call();
         tracing::info!("other consumer: global count = {global_count}, local_count = {local_count}, msg = {msg:?}");
+        drop(_enter);
+        some_call();
         Ok(())
     }
 }

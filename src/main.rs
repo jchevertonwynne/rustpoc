@@ -4,7 +4,14 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use mongodb::options::ClientOptions;
+use opentelemetry::global;
+use opentelemetry::sdk::propagation::TraceContextPropagator;
+use opentelemetry::sdk::{trace, Resource};
+use opentelemetry::KeyValue;
 use tokio::sync::{Mutex, Notify};
+use tracing_subscriber::fmt::Layer;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, Registry};
 
 use rustpoc::db::DataBase;
 use rustpoc::grpc::voting_client::VotingClient;
@@ -13,10 +20,40 @@ use rustpoc::server::Server;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_file(true)
-        .with_line_number(true)
-        .init();
+    global::set_text_map_propagator(TraceContextPropagator::new());
+
+    let exporter = opentelemetry_otlp::new_exporter()
+        .tonic();
+
+    // Define Tracer
+    let oltp_tracer = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(exporter)
+        .with_trace_config(
+            trace::config().with_resource(Resource::new(vec![KeyValue::new(
+                opentelemetry_semantic_conventions::resource::SERVICE_NAME.to_string(),
+                "rustpoc".to_string(),
+            )])),
+        )
+        .install_batch(opentelemetry::runtime::Tokio)?;
+
+    // Layer to add our configured tracer.
+    let tracing_layer = tracing_opentelemetry::layer()
+        .with_tracer(oltp_tracer)
+        .with_location(true);
+
+    let stdout_layer = Layer::new().with_line_number(true).with_file(true);
+
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or(EnvFilter::new("INFO"));
+
+    global::set_text_map_propagator(TraceContextPropagator::new());
+
+    let subscriber = Registry::default()
+        .with(env_filter)
+        .with(tracing_layer)
+        .with(stdout_layer);
+
+    tracing::subscriber::set_global_default(subscriber)?;
 
     let shutdown = Killer::new();
 
@@ -51,7 +88,6 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("checked rabbit queue and exchange bindings");
 
     let delegator = Arc::new(BodyConsumer::default());
-    // let delegator = (Arc::new(BodyConsumer::default()), Arc::new(SomeOtherConsumer::default()));
     rabbit
         .consume(QUEUE, delegator)
         .await
@@ -101,6 +137,8 @@ async fn main() -> anyhow::Result<()> {
     grpc_handle.await.context("tonic server failure")?;
 
     tracing::info!("tonic shutdown");
+
+    global::shutdown_tracer_provider();
 
     Ok(())
 }

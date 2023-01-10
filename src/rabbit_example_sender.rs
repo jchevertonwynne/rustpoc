@@ -18,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("connected, sending messages");
 
-    for i in 0..100 {
+    for i in 0..1 {
         let name = if i % 2 == 0 { "joseph" } else { "ben" };
 
         tokio::try_join!(

@@ -15,6 +15,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
+use tracing::Level;
 
 use crate::db::{ChosenCollection, DataBase, Object};
 use crate::grpc::voting_client::VotingClient;
@@ -40,6 +41,7 @@ impl Server {
         grpc_client: Arc<Mutex<VotingClient<Channel>>>,
     ) -> Server {
         let router = Router::new()
+            .layer(axum_tracing_opentelemetry::opentelemetry_tracing_layer())
             .route("/divide", post(divide))
             .route("/", post(handle))
             .with_state(AppState {
@@ -92,12 +94,14 @@ pub struct DivideResult {
     result: isize,
 }
 
+#[tracing::instrument(name = "hit the handler which does stuff", skip(rabbit, mongo, grpc))]
 async fn handle(
     State(rabbit): State<Arc<Rabbit>>,
     State(mongo): State<Arc<DataBase>>,
     State(grpc): State<Arc<Mutex<VotingClient<Channel>>>>,
     res: Result<Json<Body>, JsonRejection>,
 ) -> Result<Json<ResultBody>, ServeError> {
+    tracing::info!("i am in the handler!");
     let body = match res {
         Ok(Json(body)) => body,
         Err(err) => {
@@ -105,6 +109,9 @@ async fn handle(
             return Err(err.into());
         }
     };
+
+    let conn_type_span = tracing::span!(Level::INFO, "connector type", body.connector_type);
+    let _entered = conn_type_span.enter();
 
     let col = mongo.collection::<Object>(ChosenCollection::Sample);
 
@@ -120,6 +127,9 @@ async fn handle(
             return Err(err.into());
         }
     };
+
+    let doc_count_span = tracing::span!(parent: &conn_type_span, Level::INFO, "doc count", doc_count);
+    let _entered = doc_count_span.enter();
 
     if let Err(err) = rabbit.publish_json(EXCHANGE, MESSAGE_TYPE, body).await {
         tracing::error!("failed to publish rabbit msg: {:?}", err);
@@ -181,18 +191,18 @@ impl IntoResponse for ServeError {
 pub struct Body {
     #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "gamesConsoleConnectorId")]
-    games_console_connector_id: ObjectId,
+    pub games_console_connector_id: ObjectId,
     #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "projectId")]
-    project_id: ObjectId,
+    pub project_id: ObjectId,
     #[serde(rename = "type")]
-    connector_type: String,
+    pub connector_type: String,
     #[serde(rename = "triggeredAt", with = "time::serde::rfc3339")]
-    triggered_at: OffsetDateTime,
+    pub triggered_at: OffsetDateTime,
     #[serde(rename = "oldStatus")]
-    old_status: String,
+    pub old_status: String,
     #[serde(rename = "newStatus")]
-    new_status: String,
+    pub new_status: String,
 }
 
 impl From<Body> for Object {
