@@ -1,21 +1,30 @@
+use async_channel::{Receiver, Sender};
 use std::fmt::Debug;
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use Ordering::SeqCst;
 
+use crate::Killer;
 use async_trait::async_trait;
 use futures_lite::StreamExt;
+use futures_util::pin_mut;
 use lapin::options::BasicAckOptions;
 use lapin::protocol::constants::REPLY_SUCCESS;
 use lapin::types::AMQPValue::LongString;
-use lapin::{options::{
-    BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions, QueueBindOptions,
-    QueueDeclareOptions,
-}, publisher_confirm::Confirmation, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind, Consumer};
+use lapin::{
+    options::{
+        BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions, QueueBindOptions,
+        QueueDeclareOptions,
+    },
+    publisher_confirm::Confirmation,
+    types::FieldTable,
+    BasicProperties, Channel, Connection, ConnectionProperties, Consumer, ExchangeKind,
+};
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinHandle;
 
 pub const QUEUE: &str = "queue-joseph";
 pub const EXCHANGE: &str = "exchange-joseph";
@@ -169,10 +178,12 @@ impl Rabbit {
         Ok(resp)
     }
 
-    pub async fn consume<D>(&self, queue: &str, rabbit_delegator: D) -> Result<(), lapin::Error>
-    where
-        D: RabbitDelegator,
-    {
+    pub async fn consume(
+        &self,
+        queue: &str,
+        rabbit_delegator: impl RabbitDelegator,
+        kill_signal: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<JoinHandle<()>, lapin::Error> {
         let consumer = self
             .chan
             .basic_consume(
@@ -183,25 +194,71 @@ impl Rabbit {
             )
             .await?;
 
-        tokio::spawn(run_consumer(rabbit_delegator, consumer, self.chan.clone()));
-
-        Ok(())
+        Ok(tokio::spawn(run_consumer(
+            rabbit_delegator,
+            consumer,
+            self.chan.clone(),
+            kill_signal,
+        )))
     }
 }
 
-async fn run_consumer(delegator: impl RabbitDelegator, mut consumer: Consumer, channel: Channel) {
-    let sema = Arc::new(Semaphore::new(10));
+async fn run_consumer(
+    delegator: impl RabbitDelegator,
+    mut consumer: Consumer,
+    channel: Channel,
+    kill_signal: impl Future<Output = ()> + Send + 'static,
+) {
+    type Payload = (u64, String, Vec<u8>);
+    let (sender, receiver): (Sender<Payload>, Receiver<_>) = async_channel::unbounded();
+    let killer = Killer::new();
 
+    let mut handles = Vec::new();
+
+    for _ in 0..10 {
+        let channel = channel.clone();
+        let delegator = delegator.clone();
+        let receiver = receiver.clone();
+        let kill_signal = killer.kill_signal();
+        let handle = tokio::spawn(async move {
+            pin_mut!(kill_signal);
+            loop {
+                let (delivery_tag, header, data) = tokio::select! {
+                    _ = &mut kill_signal => {
+                        tracing::info!("shutting down worker!");
+                        return;
+                    },
+                    d = receiver.recv() => d.expect("sender should be alive"),
+                };
+
+                if !delegator.delegate(&header, data).await {
+                    tracing::error!("failed to delegate message with header {}", header);
+                }
+
+                if let Err(err) = channel
+                    .basic_ack(delivery_tag, BasicAckOptions::default())
+                    .await
+                {
+                    tracing::error!("failed to ack msg: {}", err);
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    pin_mut!(kill_signal);
     loop {
-        let permit = sema.clone().acquire_owned().await.unwrap();
-
-        let delivery = consumer.next().await;
+        let delivery = tokio::select! {
+            _ = &mut kill_signal => break,
+            d = consumer.next() => d,
+        };
         let delivery = match delivery {
             Some(Ok(delivery)) => delivery,
             Some(Err(err)) => {
                 tracing::error!("error on delivery?: {}", err);
                 continue;
-            },
+            }
             None => return,
         };
 
@@ -217,16 +274,21 @@ async fn run_consumer(delegator: impl RabbitDelegator, mut consumer: Consumer, c
             .expect("message_type header should be a long string")
             .to_string();
 
-        if !delegator.delegate(&header, delivery.data, permit) {
-            tracing::error!("failed to delegate message with header {}", header);
-        }
+        let delivery_tag = delivery.delivery_tag;
+        let contents = delivery.data;
 
-        if let Err(err) = channel
-            .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
+        sender
+            .send((delivery_tag, header, contents))
             .await
-        {
-            tracing::error!("failed to ack msg: {}", err);
-        }
+            .expect("no receiver was able to take the delivery");
+    }
+
+    killer.kill();
+
+    for handle in handles {
+        handle
+            .await
+            .expect("delegator worker thread handle could not be awaited");
     }
 }
 
@@ -310,17 +372,17 @@ pub trait RabbitConsumer: Sync + Send + 'static {
     }
 }
 
+#[async_trait]
 pub trait RabbitDelegator: Clone + Send + Sync + 'static {
-    fn delegate(&self, header: &str, contents: Vec<u8>, permit: OwnedSemaphorePermit) -> bool;
+    async fn delegate(&self, header: &str, contents: Vec<u8>) -> bool;
 }
 
 macro_rules! header_matcher {
-    ($CONSUMER: expr, $HEADER: expr, $CONTENTS: expr, $PERMIT: expr) => {
+    ($CONSUMER: expr, $HEADER: expr, $CONTENTS: expr) => {
         if $CONSUMER.header_matches($HEADER) {
             let consumer = Arc::clone($CONSUMER);
             tokio::spawn(async move {
                 consumer.try_process($CONTENTS).await;
-                drop($PERMIT)
             });
 
             return true;
@@ -328,26 +390,26 @@ macro_rules! header_matcher {
     };
 }
 
+#[async_trait]
 impl<T> RabbitDelegator for Arc<T>
 where
     T: RabbitConsumer,
 {
-    fn delegate(&self, header: &str, contents: Vec<u8>, permit: OwnedSemaphorePermit) -> bool {
-        header_matcher!(self, header, contents, permit);
+    async fn delegate(&self, header: &str, contents: Vec<u8>) -> bool {
+        header_matcher!(self, header, contents);
         false
     }
 }
 
-impl<A, B> RabbitDelegator for (Arc<A>, Arc<B>)
+#[async_trait]
+impl<C, D> RabbitDelegator for (Arc<C>, D)
 where
-    A: RabbitConsumer,
-    B: RabbitConsumer,
+    C: RabbitConsumer,
+    D: RabbitDelegator,
 {
-    fn delegate(&self, header: &str, contents: Vec<u8>, permit: OwnedSemaphorePermit) -> bool {
-        tracing::info!("attempting to delegate: header = {}", header);
-        let (a, b) = self;
-        header_matcher!(a, header, contents, permit);
-        header_matcher!(b, header, contents, permit);
-        false
+    async fn delegate(&self, header: &str, contents: Vec<u8>) -> bool {
+        let (consumer, delegator) = self;
+        header_matcher!(consumer, header, contents);
+        delegator.delegate(header, contents).await
     }
 }

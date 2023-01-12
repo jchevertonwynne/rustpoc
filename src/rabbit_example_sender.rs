@@ -1,13 +1,18 @@
+use std::time::Duration;
 use anyhow::Context;
 use mongodb::bson::oid::ObjectId;
 use rustpoc::rabbit::Rabbit;
 use serde::Serialize;
+use tracing_subscriber::{EnvFilter, Registry};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_tree::HierarchicalLayer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_file(true)
-        .with_line_number(true)
+    Registry::default()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("INFO")))
+        .with(HierarchicalLayer::new(2).with_targets(true))
         .init();
 
     tracing::info!("connecting to rabbit...");
@@ -18,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("connected, sending messages");
 
-    for i in 0..1 {
+    for i in 0..100 {
         let name = if i % 2 == 0 { "joseph" } else { "ben" };
 
         tokio::try_join!(
@@ -41,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
             )
         )?;
 
-        // tokio::time::sleep(Duration::from_micros(1)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     rabbit.close().await?;

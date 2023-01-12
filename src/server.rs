@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
@@ -58,7 +59,10 @@ impl Server {
         receiver: impl Send + Future<Output = ()>,
     ) -> Result<impl Send + Future<Output = Result<(), hyper::Error>>, RunError> {
         let server = axum::Server::from_tcp(listener)?
-            .serve(self.router.into_make_service())
+            .serve(
+                self.router
+                    .into_make_service_with_connect_info::<SocketAddr>(),
+            )
             .with_graceful_shutdown(receiver);
         Ok(server)
     }
@@ -128,7 +132,8 @@ async fn handle(
         }
     };
 
-    let doc_count_span = tracing::span!(parent: &conn_type_span, Level::INFO, "doc count", doc_count);
+    let doc_count_span =
+        tracing::span!(parent: &conn_type_span, Level::INFO, "doc count", doc_count);
     let _entered = doc_count_span.enter();
 
     if let Err(err) = rabbit.publish_json(EXCHANGE, MESSAGE_TYPE, body).await {

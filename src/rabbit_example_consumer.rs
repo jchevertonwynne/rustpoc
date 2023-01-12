@@ -2,17 +2,22 @@ use anyhow::Context;
 use async_trait::async_trait;
 use mongodb::bson::oid::ObjectId;
 use rustpoc::rabbit::{Rabbit, RabbitConsumer};
+use rustpoc::Killer;
 use serde::Deserialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tracing::Level;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Registry};
 use Ordering::SeqCst;
+use tracing_subscriber::fmt::Layer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_file(true)
-        .with_line_number(true)
+    Registry::default()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("INFO")))
+        .with(Layer::new().with_line_number(true).with_file(true))
         .init();
 
     tracing::info!("hello!");
@@ -42,8 +47,10 @@ async fn main() -> anyhow::Result<()> {
         }),
     );
 
-    rabbit
-        .consume("jqueue", delegator)
+    let killer = Killer::new();
+
+    let consume_handle = rabbit
+        .consume("jqueue", delegator, killer.kill_signal())
         .await
         .context("failed to start consumer")?;
 
@@ -55,7 +62,10 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("shutting down");
 
+    killer.kill();
     rabbit.close().await?;
+
+    consume_handle.await?;
 
     tracing::info!("closed rabbit");
 
@@ -98,7 +108,7 @@ impl RabbitConsumer for MyConsumer {
     #[tracing::instrument(
         name = "handling a received rabbit msg",
         skip(self, msg, _raw),
-        fields(name=msg.name, arms=msg.arms, header="header1")
+        fields(name=msg.name, arms=msg.arms, header="header1", id=ObjectId::new().to_hex())
     )]
     async fn process(
         self: Arc<Self>,
@@ -154,7 +164,7 @@ impl RabbitConsumer for MyOtherConsumer {
     #[tracing::instrument(
         name = "handling an other received rabbit msg",
         skip(self, msg, _raw),
-        fields(header = "header2")
+        fields(header = "header2", id=ObjectId::new().to_hex())
     )]
     async fn process(
         self: Arc<Self>,
