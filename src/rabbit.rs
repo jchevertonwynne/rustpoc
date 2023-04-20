@@ -1,14 +1,11 @@
 use async_channel::{Receiver, Sender};
 use std::fmt::Debug;
-use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use Ordering::SeqCst;
 
-use crate::Killer;
 use async_trait::async_trait;
-use futures_lite::StreamExt;
-use futures_util::pin_mut;
+use futures_util::StreamExt;
 use lapin::options::BasicAckOptions;
 use lapin::protocol::constants::REPLY_SUCCESS;
 use lapin::types::AMQPValue::LongString;
@@ -25,6 +22,7 @@ use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 pub const QUEUE: &str = "queue-joseph";
 pub const EXCHANGE: &str = "exchange-joseph";
@@ -182,7 +180,7 @@ impl Rabbit {
         &self,
         queue: &str,
         rabbit_delegator: impl RabbitDelegator,
-        kill_signal: impl Future<Output = ()> + Send + 'static,
+        kill_signal: CancellationToken,
     ) -> Result<JoinHandle<()>, lapin::Error> {
         let consumer = self
             .chan
@@ -203,15 +201,20 @@ impl Rabbit {
     }
 }
 
+struct Payload {
+    delivery_tag: u64,
+    header: String,
+    contents: Vec<u8>,
+}
+
 async fn run_consumer(
     delegator: impl RabbitDelegator,
     mut consumer: Consumer,
     channel: Channel,
-    kill_signal: impl Future<Output = ()> + Send + 'static,
+    kill_signal: CancellationToken,
 ) {
-    type Payload = (u64, String, Vec<u8>);
     let (sender, receiver): (Sender<Payload>, Receiver<_>) = async_channel::unbounded();
-    let killer = Killer::new();
+    let killer = CancellationToken::new();
 
     let mut handles = Vec::new();
 
@@ -219,38 +222,14 @@ async fn run_consumer(
         let channel = channel.clone();
         let delegator = delegator.clone();
         let receiver = receiver.clone();
-        let kill_signal = killer.kill_signal();
-        let handle = tokio::spawn(async move {
-            pin_mut!(kill_signal);
-            loop {
-                let (delivery_tag, header, data) = tokio::select! {
-                    _ = &mut kill_signal => {
-                        tracing::info!("shutting down worker!");
-                        return;
-                    },
-                    d = receiver.recv() => d.expect("sender should be alive"),
-                };
-
-                if !delegator.delegate(&header, data).await {
-                    tracing::error!("failed to delegate message with header {}", header);
-                }
-
-                if let Err(err) = channel
-                    .basic_ack(delivery_tag, BasicAckOptions::default())
-                    .await
-                {
-                    tracing::error!("failed to ack msg: {}", err);
-                }
-            }
-        });
-
+        let kill_signal = killer.clone();
+        let handle = tokio::spawn(worker(channel, receiver, delegator, kill_signal));
         handles.push(handle);
     }
 
-    pin_mut!(kill_signal);
     loop {
         let delivery = tokio::select! {
-            _ = &mut kill_signal => break,
+            _ = kill_signal.cancelled() => break,
             d = consumer.next() => d,
         };
         let delivery = match delivery {
@@ -278,17 +257,61 @@ async fn run_consumer(
         let contents = delivery.data;
 
         sender
-            .send((delivery_tag, header, contents))
+            .send(Payload {
+                delivery_tag,
+                header,
+                contents,
+            })
             .await
             .expect("no receiver was able to take the delivery");
     }
 
-    killer.kill();
+    killer.cancel();
 
     for handle in handles {
         handle
             .await
             .expect("delegator worker thread handle could not be awaited");
+    }
+}
+
+async fn worker(
+    channel: Channel,
+    receiver: Receiver<Payload>,
+    delegator: impl RabbitDelegator,
+    kill_signal: CancellationToken,
+) {
+    let mut kill_signal = std::pin::pin!(kill_signal.cancelled());
+    loop {
+        let Payload {
+            delivery_tag,
+            header,
+            contents,
+        } = tokio::select! {
+            _ = kill_signal.as_mut() => {
+                tracing::info!("shutting down worker!");
+                return;
+            },
+            delivery = receiver.recv() => delivery.expect("sender should be alive"),
+        };
+
+        let span = tracing::span!(
+            tracing::Level::INFO,
+            "received a message to process",
+            header
+        );
+        let _entered = span.enter();
+
+        if !delegator.delegate(&header, contents).await {
+            tracing::error!("failed to delegate message with header {}", header);
+        }
+
+        if let Err(err) = channel
+            .basic_ack(delivery_tag, BasicAckOptions::default())
+            .await
+        {
+            tracing::error!("failed to ack msg: {}", err);
+        }
     }
 }
 
@@ -381,10 +404,7 @@ macro_rules! header_matcher {
     ($CONSUMER: expr, $HEADER: expr, $CONTENTS: expr) => {
         if $CONSUMER.header_matches($HEADER) {
             let consumer = Arc::clone($CONSUMER);
-            tokio::spawn(async move {
-                consumer.try_process($CONTENTS).await;
-            });
-
+            consumer.try_process($CONTENTS).await;
             return true;
         }
     };

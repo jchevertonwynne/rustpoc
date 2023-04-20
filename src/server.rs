@@ -15,6 +15,7 @@ use serde_with::DisplayFromStr;
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::Level;
 
@@ -56,14 +57,15 @@ impl Server {
     pub fn build_server(
         self,
         listener: std::net::TcpListener,
-        receiver: impl Send + Future<Output = ()>,
+        cancel: CancellationToken,
     ) -> Result<impl Send + Future<Output = Result<(), hyper::Error>>, RunError> {
+        let shutdown = async move { cancel.cancelled().await };
         let server = axum::Server::from_tcp(listener)?
             .serve(
                 self.router
                     .into_make_service_with_connect_info::<SocketAddr>(),
             )
-            .with_graceful_shutdown(receiver);
+            .with_graceful_shutdown(shutdown);
         Ok(server)
     }
 }

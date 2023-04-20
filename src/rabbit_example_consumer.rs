@@ -2,16 +2,16 @@ use anyhow::Context;
 use async_trait::async_trait;
 use mongodb::bson::oid::ObjectId;
 use rustpoc::rabbit::{Rabbit, RabbitConsumer};
-use rustpoc::Killer;
 use serde::Deserialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tracing::Level;
+use tokio_util::sync::CancellationToken;
+use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Registry};
 use Ordering::SeqCst;
-use tracing_subscriber::fmt::Layer;
+use std::borrow::Cow;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -47,10 +47,10 @@ async fn main() -> anyhow::Result<()> {
         }),
     );
 
-    let killer = Killer::new();
+    let killer = CancellationToken::new();
 
     let consume_handle = rabbit
-        .consume("jqueue", delegator, killer.kill_signal())
+        .consume("jqueue", delegator, killer.clone())
         .await
         .context("failed to start consumer")?;
 
@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("shutting down");
 
-    killer.kill();
+    killer.cancel();
     rabbit.close().await?;
 
     consume_handle.await?;
@@ -79,7 +79,7 @@ struct MyConsumer {
 
 #[derive(Deserialize, Debug)]
 struct MyConsumerMessage<'a> {
-    name: &'a str,
+    name: Cow<'a, str>,
     arms: usize,
 }
 
@@ -108,7 +108,7 @@ impl RabbitConsumer for MyConsumer {
     #[tracing::instrument(
         name = "handling a received rabbit msg",
         skip(self, msg, _raw),
-        fields(name=msg.name, arms=msg.arms, header="header1", id=ObjectId::new().to_hex())
+        fields(name=msg.name.as_ref(), arms=msg.arms, id=ObjectId::new().to_hex())
     )]
     async fn process(
         self: Arc<Self>,
@@ -164,7 +164,7 @@ impl RabbitConsumer for MyOtherConsumer {
     #[tracing::instrument(
         name = "handling an other received rabbit msg",
         skip(self, msg, _raw),
-        fields(header = "header2", id=ObjectId::new().to_hex())
+        fields(id=ObjectId::new().to_hex())
     )]
     async fn process(
         self: Arc<Self>,
@@ -174,7 +174,7 @@ impl RabbitConsumer for MyOtherConsumer {
         let global_count = self.global_count.fetch_add(1, SeqCst) + 1;
         let local_count = self.count.fetch_add(1, SeqCst) + 1;
         some_call();
-        let span = tracing::span!(Level::INFO, "other msg count", local_count);
+        let span = tracing::span!(tracing::Level::INFO, "other msg count", local_count);
         let _enter = span.enter();
         some_call();
         tracing::info!("other consumer: global count = {global_count}, local_count = {local_count}, msg = {msg:?}");

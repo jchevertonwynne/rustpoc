@@ -9,15 +9,15 @@ use opentelemetry::sdk::propagation::TraceContextPropagator;
 use opentelemetry::sdk::{trace, Resource};
 use opentelemetry::KeyValue;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
+use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Registry};
-use tracing_subscriber::fmt::Layer;
 
 use rustpoc::db::DataBase;
 use rustpoc::grpc::voting_client::VotingClient;
 use rustpoc::rabbit::{BodyConsumer, Rabbit, QUEUE};
 use rustpoc::server::Server;
-use rustpoc::Killer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -50,13 +50,18 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_layer)
         .init();
 
-    let shutdown = Killer::new();
+    let shutdown = CancellationToken::new();
+
+    let killer = {
+        let shutdown = shutdown.clone();
+        async move { shutdown.cancelled().await }
+    };
 
     let grpc_handle = tokio::spawn(rustpoc::grpc::run_server(
         "127.0.0.1:3001"
             .parse()
             .context("failed to parse address")?,
-        shutdown.kill_signal(),
+        killer,
     ));
 
     let database = Arc::new(DataBase::new({
@@ -84,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
 
     let delegator = Arc::new(BodyConsumer::default());
     let consumer_handle = rabbit
-        .consume(QUEUE, delegator, shutdown.kill_signal())
+        .consume(QUEUE, delegator, shutdown.clone())
         .await
         .context("failed to start consumer")?;
 
@@ -102,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
         TcpListener::bind(("127.0.0.1", 2987)).context("failed to bind tcp listener to port")?;
 
     let app = Server::new(Arc::clone(&rabbit), database, client)
-        .build_server(listener, shutdown.kill_signal())
+        .build_server(listener, shutdown.clone())
         .context("failed to build server")?;
 
     let axum_handle = tokio::spawn(app);
@@ -117,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
         std::process::abort();
     });
 
-    shutdown.kill();
+    shutdown.cancel();
 
     tracing::info!("closing down program...");
 

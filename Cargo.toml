@@ -29,8 +29,7 @@ async-channel = "1.8.0"
 async-trait = "0.1.60"
 axum = "0.6.1"
 axum-macros = "0.3.0"
-axum-tracing-opentelemetry = { version = "0.7.4", features = ["otlp"] }
-futures-lite = "1.12.0"
+axum-tracing-opentelemetry = { version = "0.9.0", features = ["otlp"] }
 futures-util = "0.3.25"
 hyper = { version = "0.14.20", features = ["full"] }
 lapin = "2.1.1"
@@ -48,6 +47,7 @@ time = { version = "0.3.15", features = ["serde-well-known"] }
 tokio = { version = "1.21.2", features = ["full"] }
 tokio-executor-trait = "2.1.0"
 tokio-reactor-trait = "1.1.0"
+tokio-util = "0.7.4"
 tonic = "0.8.2"
 tower-http = { version = "0.3.4", features = ["full"] }
 tracing = "0.1.37"
