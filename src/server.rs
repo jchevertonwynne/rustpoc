@@ -121,7 +121,7 @@ async fn handle(
 
     let col = mongo.collection::<Object>(ChosenCollection::Sample);
 
-    if let Err(err) = col.insert(body.clone()).await {
+    if let Err(err) = col.insert(body.clone().into()).await {
         tracing::error!("failed to insert doc to mongo: {:?}", err);
         return Err(err.into());
     }

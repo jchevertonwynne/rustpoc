@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use mongodb::bson::oid::ObjectId;
 use rustpoc::rabbit::{Rabbit, RabbitConsumer};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -11,7 +12,6 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Registry};
 use Ordering::SeqCst;
-use std::borrow::Cow;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

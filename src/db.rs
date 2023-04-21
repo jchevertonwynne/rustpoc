@@ -57,8 +57,8 @@ impl<T> MongoCollection<T> {
 }
 
 impl<T: Serialize> MongoCollection<T> {
-    pub async fn insert(&self, obj: impl Into<T>) -> Result<InsertOneResult, Error> {
-        self.collection.insert_one(obj.into(), None).await
+    pub async fn insert(&self, obj: T) -> Result<InsertOneResult, Error> {
+        self.collection.insert_one(obj, None).await
     }
 }
 

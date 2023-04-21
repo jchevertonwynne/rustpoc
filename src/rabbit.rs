@@ -152,11 +152,11 @@ impl Rabbit {
         self.conn.close(REPLY_SUCCESS, "thank you!").await
     }
 
-    pub async fn publish_json(
+    pub async fn publish_json<S: Serialize>(
         &self,
         exchange: &str,
         message_type: &str,
-        body: impl Serialize,
+        body: S,
     ) -> Result<Confirmation, PublishError> {
         let body = serde_json::to_string(&body)?;
         let mut headers = self.headers.clone();
@@ -176,10 +176,10 @@ impl Rabbit {
         Ok(resp)
     }
 
-    pub async fn consume(
+    pub async fn consume<D: RabbitDelegator>(
         &self,
         queue: &str,
-        rabbit_delegator: impl RabbitDelegator,
+        rabbit_delegator: D,
         kill_signal: CancellationToken,
     ) -> Result<JoinHandle<()>, lapin::Error> {
         let consumer = self
@@ -207,8 +207,8 @@ struct Payload {
     contents: Vec<u8>,
 }
 
-async fn run_consumer(
-    delegator: impl RabbitDelegator,
+async fn run_consumer<D: RabbitDelegator>(
+    delegator: D,
     mut consumer: Consumer,
     channel: Channel,
     kill_signal: CancellationToken,
@@ -275,10 +275,10 @@ async fn run_consumer(
     }
 }
 
-async fn worker(
+async fn worker<D: RabbitDelegator>(
     channel: Channel,
     receiver: Receiver<Payload>,
-    delegator: impl RabbitDelegator,
+    delegator: D,
     kill_signal: CancellationToken,
 ) {
     let mut kill_signal = std::pin::pin!(kill_signal.cancelled());
@@ -400,36 +400,73 @@ pub trait RabbitDelegator: Clone + Send + Sync + 'static {
     async fn delegate(&self, header: &str, contents: Vec<u8>) -> bool;
 }
 
-macro_rules! header_matcher {
-    ($CONSUMER: expr, $HEADER: expr, $CONTENTS: expr) => {
-        if $CONSUMER.header_matches($HEADER) {
-            let consumer = Arc::clone($CONSUMER);
-            consumer.try_process($CONTENTS).await;
-            return true;
+macro_rules! delegator_tuple {
+    ( $ty:tt ) => {
+        #[allow(non_snake_case, unused_parens)]
+        #[async_trait]
+        impl< $ty > RabbitDelegator for Arc<$ty>
+        where
+            $ty: RabbitConsumer
+        {
+            async fn delegate(&self, header: &str, contents: Vec<u8>) -> bool {
+                if self.header_matches(header) {
+                    let consumer = Arc::clone(self);
+                    consumer.try_process(contents).await;
+                    return true;
+                }
+                false
+            }
+        }
+
+        #[allow(non_snake_case, unused_parens)]
+        #[async_trait]
+        impl< $ty > RabbitDelegator for (Arc<$ty>,)
+        where
+            $ty: RabbitConsumer
+        {
+            async fn delegate(&self, header: &str, contents: Vec<u8>) -> bool {
+                let ($ty,) = self;
+                if $ty.header_matches(header) {
+                    let consumer = Arc::clone($ty);
+                    consumer.try_process(contents).await;
+                    return true;
+                }
+                false
+            }
         }
     };
-}
-
-#[async_trait]
-impl<T> RabbitDelegator for Arc<T>
-where
-    T: RabbitConsumer,
-{
-    async fn delegate(&self, header: &str, contents: Vec<u8>) -> bool {
-        header_matcher!(self, header, contents);
-        false
+    ( $($ty:tt),* ) => {
+        #[allow(non_snake_case, unused_parens)]
+        #[async_trait]
+        impl< $($ty),* > RabbitDelegator for (
+            $(Arc<$ty>),*
+        )
+        where
+            $($ty: RabbitConsumer),*
+        {
+            async fn delegate(&self, header: &str, contents: Vec<u8>) -> bool {
+                let ($($ty),*) = self;
+                $(
+                if $ty.header_matches(header) {
+                    let consumer = Arc::clone($ty);
+                    consumer.try_process(contents).await;
+                    return true;
+                }
+                )*
+                false
+            }
+        }
     }
 }
 
-#[async_trait]
-impl<C, D> RabbitDelegator for (Arc<C>, D)
-where
-    C: RabbitConsumer,
-    D: RabbitDelegator,
-{
-    async fn delegate(&self, header: &str, contents: Vec<u8>) -> bool {
-        let (consumer, delegator) = self;
-        header_matcher!(consumer, header, contents);
-        delegator.delegate(header, contents).await
-    }
-}
+delegator_tuple!(A);
+delegator_tuple!(A, B);
+delegator_tuple!(A, B, C);
+delegator_tuple!(A, B, C, D);
+delegator_tuple!(A, B, C, D, E);
+delegator_tuple!(A, B, C, D, E, F);
+delegator_tuple!(A, B, C, D, E, F, G);
+delegator_tuple!(A, B, C, D, E, F, G, H);
+delegator_tuple!(A, B, C, D, E, F, G, H, I);
+delegator_tuple!(A, B, C, D, E, F, G, H, I, J);
+delegator_tuple!(A, B, C, D, E, F, G, H, I, J, K);
