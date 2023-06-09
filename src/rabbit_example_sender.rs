@@ -6,13 +6,11 @@ use std::time::Duration;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Registry};
-use tracing_tree::HierarchicalLayer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     Registry::default()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("INFO")))
-        .with(HierarchicalLayer::new(2).with_targets(true))
         .init();
 
     tracing::info!("connecting to rabbit...");

@@ -4,14 +4,13 @@ use mongodb::bson::oid::ObjectId;
 use rustpoc::rabbit::{Rabbit, RabbitConsumer};
 use serde::Deserialize;
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Registry};
-use Ordering::SeqCst;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -37,14 +36,14 @@ async fn main() -> anyhow::Result<()> {
     let global_count = Arc::new(AtomicUsize::default());
 
     let delegator = (
-        Arc::new(MyConsumer {
+        MyConsumer {
             count: AtomicUsize::default(),
             global_count: global_count.clone(),
-        }),
-        Arc::new(MyOtherConsumer {
+        },
+        MyOtherConsumer {
             count: AtomicUsize::default(),
             global_count,
-        }),
+        },
     );
 
     let killer = CancellationToken::new();
@@ -111,7 +110,7 @@ impl RabbitConsumer for MyConsumer {
         fields(name=msg.name.as_ref(), arms=msg.arms, id=ObjectId::new().to_hex())
     )]
     async fn process(
-        self: Arc<Self>,
+        &self,
         msg: Self::Message<'_>,
         _raw: &[u8],
     ) -> Result<(), Self::ConsumerError> {
@@ -167,7 +166,7 @@ impl RabbitConsumer for MyOtherConsumer {
         fields(id=ObjectId::new().to_hex())
     )]
     async fn process(
-        self: Arc<Self>,
+        &self,
         msg: Self::Message<'_>,
         _raw: &[u8],
     ) -> Result<(), Self::ConsumerError> {

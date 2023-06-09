@@ -43,7 +43,6 @@ impl Server {
         grpc_client: Arc<Mutex<VotingClient<Channel>>>,
     ) -> Server {
         let router = Router::new()
-            .layer(axum_tracing_opentelemetry::opentelemetry_tracing_layer())
             .route("/divide", post(divide))
             .route("/", post(handle))
             .with_state(AppState {

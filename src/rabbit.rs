@@ -38,9 +38,7 @@ pub struct Rabbit {
 
 impl Rabbit {
     pub async fn new(address: &str) -> lapin::Result<Rabbit> {
-        let connection_properties = ConnectionProperties::default()
-            .with_executor(tokio_executor_trait::Tokio::current())
-            .with_reactor(tokio_reactor_trait::Tokio);
+        let connection_properties = ConnectionProperties::default();
         let conn = Connection::connect(address, connection_properties).await?;
 
         let field_table = {
@@ -218,9 +216,10 @@ async fn run_consumer<D: RabbitDelegator>(
 
     let mut handles = Vec::new();
 
+    let delegator = Arc::new(delegator);
     for _ in 0..10 {
         let channel = channel.clone();
-        let delegator = delegator.clone();
+        let delegator = Arc::clone(&delegator);
         let receiver = receiver.clone();
         let kill_signal = killer.clone();
         let handle = tokio::spawn(worker(channel, receiver, delegator, kill_signal));
@@ -278,7 +277,7 @@ async fn run_consumer<D: RabbitDelegator>(
 async fn worker<D: RabbitDelegator>(
     channel: Channel,
     receiver: Receiver<Payload>,
-    delegator: D,
+    delegator: Arc<D>,
     kill_signal: CancellationToken,
 ) {
     let mut kill_signal = std::pin::pin!(kill_signal.cancelled());
@@ -353,7 +352,7 @@ impl RabbitConsumer for BodyConsumer {
     }
 
     async fn process(
-        self: Arc<Self>,
+        &self,
         msg: Self::Message<'_>,
         _raw: &[u8],
     ) -> Result<(), Self::ConsumerError> {
@@ -375,19 +374,19 @@ pub trait RabbitConsumer: Sync + Send + 'static {
     }
 
     async fn process(
-        self: Arc<Self>,
+        &self,
         msg: Self::Message<'_>,
         raw: &[u8],
     ) -> Result<(), Self::ConsumerError>;
 
-    async fn try_process(self: Arc<Self>, contents: Vec<u8>) {
+    async fn try_process(&self, contents: Vec<u8>) {
         if let Err(err) = self.try_consume_inner(contents).await {
             tracing::error!("failed to process message: {}", err);
         }
     }
 
     async fn try_consume_inner(
-        self: Arc<Self>,
+        &self,
         contents: Vec<u8>,
     ) -> Result<(), Self::ConsumerError> {
         let message = self.parse_msg(&contents)?;
@@ -396,7 +395,7 @@ pub trait RabbitConsumer: Sync + Send + 'static {
 }
 
 #[async_trait]
-pub trait RabbitDelegator: Clone + Send + Sync + 'static {
+pub trait RabbitDelegator: Send + Sync + 'static {
     async fn delegate(&self, header: &str, contents: Vec<u8>) -> bool;
 }
 
@@ -410,8 +409,7 @@ macro_rules! delegator_tuple {
         {
             async fn delegate(&self, header: &str, contents: Vec<u8>) -> bool {
                 if self.header_matches(header) {
-                    let consumer = Arc::clone(self);
-                    consumer.try_process(contents).await;
+                    self.try_process(contents).await;
                     return true;
                 }
                 false
@@ -420,15 +418,14 @@ macro_rules! delegator_tuple {
 
         #[allow(non_snake_case, unused_parens)]
         #[async_trait]
-        impl< $ty > RabbitDelegator for (Arc<$ty>,)
+        impl< $ty > RabbitDelegator for ($ty,)
         where
             $ty: RabbitConsumer
         {
             async fn delegate(&self, header: &str, contents: Vec<u8>) -> bool {
                 let ($ty,) = self;
                 if $ty.header_matches(header) {
-                    let consumer = Arc::clone($ty);
-                    consumer.try_process(contents).await;
+                    $ty.try_process(contents).await;
                     return true;
                 }
                 false
@@ -439,7 +436,7 @@ macro_rules! delegator_tuple {
         #[allow(non_snake_case, unused_parens)]
         #[async_trait]
         impl< $($ty),* > RabbitDelegator for (
-            $(Arc<$ty>),*
+            $($ty),*
         )
         where
             $($ty: RabbitConsumer),*
@@ -448,8 +445,7 @@ macro_rules! delegator_tuple {
                 let ($($ty),*) = self;
                 $(
                 if $ty.header_matches(header) {
-                    let consumer = Arc::clone($ty);
-                    consumer.try_process(contents).await;
+                    $ty.try_process(contents).await;
                     return true;
                 }
                 )*

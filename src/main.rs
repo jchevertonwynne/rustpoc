@@ -4,10 +4,6 @@ use std::time::Duration;
 
 use anyhow::Context;
 use mongodb::options::ClientOptions;
-use opentelemetry::global;
-use opentelemetry::sdk::propagation::TraceContextPropagator;
-use opentelemetry::sdk::{trace, Resource};
-use opentelemetry::KeyValue;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::fmt::Layer;
@@ -21,33 +17,11 @@ use rustpoc::server::Server;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let exporter = opentelemetry_otlp::new_exporter().tonic();
-
-    // Define Tracer
-    let oltp_tracer = opentelemetry_otlp::new_pipeline()
-        .tracing()
-        .with_exporter(exporter)
-        .with_trace_config(
-            trace::config().with_resource(Resource::new(vec![KeyValue::new(
-                opentelemetry_semantic_conventions::resource::SERVICE_NAME.to_string(),
-                "rustpoc".to_string(),
-            )])),
-        )
-        .install_batch(opentelemetry::runtime::Tokio)?;
-
-    // Layer to add our configured tracer.
-    let tracing_layer = tracing_opentelemetry::layer()
-        .with_tracer(oltp_tracer)
-        .with_location(true);
-
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("INFO"));
-
-    global::set_text_map_propagator(TraceContextPropagator::new());
 
     Registry::default()
         .with(env_filter)
         .with(Layer::new().with_line_number(true).with_file(true))
-        .with(tracing_layer)
         .init();
 
     let shutdown = CancellationToken::new();
@@ -147,8 +121,6 @@ async fn main() -> anyhow::Result<()> {
     grpc_handle.await.context("tonic server failure")?;
 
     tracing::info!("tonic shutdown");
-
-    global::shutdown_tracer_provider();
 
     Ok(())
 }
